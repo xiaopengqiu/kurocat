@@ -1,0 +1,39 @@
+.github/workflows/release.yml
+  s_cf81f22f71dfa9::t_1ae9b2fe94c3a0 164-168
+  s_cf81f22f71dfa9::t_887b2758a29ac1 27,123-126,169,171
+src-tauri/src/updater.rs
+  s_cf81f22f71dfa9::t_3258d2a942e992 1158-1174
+  s_cf81f22f71dfa9::t_f857be65eda0f5 6-7,164-173,1186,1189,1194,1200,1206,1209,1243,1247
+README.md
+  s_cf81f22f71dfa9::t_d89c060dee54d7 49-54
+package-lock.json
+  s_cf81f22f71dfa9::t_35e2b29c667b9d 3,9
+package.json
+  s_cf81f22f71dfa9::t_acd8e41f1e8df1 3
+src-tauri/Cargo.lock
+  s_cf81f22f71dfa9::t_b40e3b04007062 1793
+src-tauri/Cargo.toml
+  s_cf81f22f71dfa9::t_396dab97cefae3 3
+src-tauri/tauri.conf.json
+  s_cf81f22f71dfa9::t_21d5adb087dee6 4
+src/main.ts
+  s_cf81f22f71dfa9::t_f17d2d69db633e 121
+src/menuMain.ts
+  s_cf81f22f71dfa9::t_996af669983213 97
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "116c3eba8984d45e1d09e380f086ef934ceb2b92",
+  "prompts": {},
+  "sessions": {
+    "s_cf81f22f71dfa9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a216dd-1586-7912-a029-67b51b18cd63",
+        "model": "gpt-6.2-sol"
+      },
+      "human_author": "裕琦 <qiuxiaopeng.qxp@antgroup.com>"
+    }
+  }
+}
