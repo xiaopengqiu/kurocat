@@ -1,0 +1,33 @@
+package-lock.json
+  s_cf81f22f71dfa9::t_3e6010eaca65ba 3,9
+package.json
+  s_cf81f22f71dfa9::t_6c07bfa9e3ab3b 3
+src-tauri/Cargo.lock
+  s_cf81f22f71dfa9::t_76cd1f5991fbdc 1793
+src-tauri/Cargo.toml
+  s_cf81f22f71dfa9::t_1c86d365e228e7 3
+src-tauri/src/updater.rs
+  s_cf81f22f71dfa9::t_7ab669c550b7e2 36-37,63,689-691,965-986,988-989,992-997,1000-1002,1269-1270
+src-tauri/tauri.conf.json
+  s_cf81f22f71dfa9::t_d4087bde718bf0 4
+src/main.ts
+  s_cf81f22f71dfa9::t_9a03ad5accadeb 90,122
+src/menuMain.ts
+  s_cf81f22f71dfa9::t_50edd8544b7145 53,98
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "90b769a71450e0dced63081fda3598888bb36054",
+  "prompts": {},
+  "sessions": {
+    "s_cf81f22f71dfa9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a216dd-1586-7912-a029-67b51b18cd63",
+        "model": "gpt-6.2-sol"
+      },
+      "human_author": "裕琦 <qiuxiaopeng.qxp@antgroup.com>"
+    }
+  }
+}
