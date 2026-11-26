@@ -176,6 +176,38 @@ html.win7-ulw-mode #collar-row {
   color: #9ca3af;
 }
 
+.idle-setting-row,
+.idle-setting-value {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.idle-setting-row {
+  justify-content: space-between;
+  min-height: 24px;
+}
+
+.idle-setting-value {
+  color: #9ca3af;
+  font-size: 11.5px;
+}
+
+#idle-delay-seconds {
+  width: 58px;
+  padding: 3px 5px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #f3f4f6;
+  font: inherit;
+}
+
+#idle-animations-enabled {
+  margin: 0;
+  accent-color: #c8f538;
+}
+
 .menu-hint {
   font-size: 10.5px;
   color: #9ca3af;

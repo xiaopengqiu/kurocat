@@ -553,6 +553,7 @@ fn update_settings(app: AppHandle, state: State<'_, AppState>, mut patch: AppSet
     patch.collar_color = config::normalize_collar_color(&patch.collar_color);
     patch.headphone_mode = config::normalize_headphone_mode(&patch.headphone_mode);
     patch.fps_cap = config::normalize_fps_cap(patch.fps_cap);
+    patch.idle_delay_seconds = config::normalize_idle_delay_seconds(patch.idle_delay_seconds);
     patch.language = config::normalize_language(&patch.language);
 
     let (prev_autostart, prev_scale, prev_layout, prev_obs_hide, prev_language) = {

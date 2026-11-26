@@ -8,6 +8,7 @@ import {
   resolveKeyByVk,
 } from './keyboardLayout';
 import { catAudio } from './audio';
+import { PetGesture, SleepTransition } from './petInteraction';
 import { resolveCustomSkin, type CatSkinConfig, type ResolvedSkin } from './catSkins';
 import { DaFeiYuRenderer, type DaFeiYuLayout } from './dafeiyuRenderer';
 
@@ -433,6 +434,18 @@ export class KuroCatEngine {
     );
   }
 
+  public headPatDirection(clientX: number, clientY: number): number | null {
+    if (this.catBreed === 'dafeiyu') return null;
+    const rect = this.canvas.getBoundingClientRect();
+    const { offsetX, offsetY, uniformScale } = this.getViewportTransform();
+    if (rect.width < 2 || rect.height < 2 || uniformScale <= 0.001) return null;
+    const head = this.spinePoint(0.24, 0);
+    const dx = ((clientX - rect.left) * this.canvas.width / rect.width - offsetX) / uniformScale - head.x;
+    const dy = ((clientY - rect.top) * this.canvas.height / rect.height - offsetY) / uniformScale - head.y;
+    if (Math.hypot(dx / 68, dy / (this.catHeight * 0.25)) > 1) return null;
+    return Math.sign(dx || 1) * Math.max(0.35, Math.abs(dx / 68));
+  }
+
   public hitTestKeyAtClientPoint(clientX: number, clientY: number): KeySpec | null {
     const rect = this.canvas.getBoundingClientRect();
     if (rect.width < 2 || rect.height < 2) return null;
@@ -802,7 +815,15 @@ export class KuroCatEngine {
   private petStrokeCount = 0;
   private lastPetMoveAt = -10000;
   private petEnergy = 0;
+  private readonly petGesture = new PetGesture();
+  private readonly sleepTransition = new SleepTransition();
+  private idleDelayMs: number | undefined;
+  private idleAnimationsEnabled = true;
+  private idleStretch = 0;
+  private petTail = 0;
+  private sleepTail = 0;
   private squintAmount = 0;
+  private purrAmount = 0;
   private earTwitchLeft = 0;
   private earTwitchRight = 0;
   private recentKeyTimes: number[] = [];
@@ -924,6 +945,21 @@ export class KuroCatEngine {
     this.gameActive = Boolean(active);
   }
 
+  public setIdlePreferences(delaySeconds: number, animationsEnabled: boolean): void {
+    this.idleDelayMs = delaySeconds * 1000;
+    this.idleAnimationsEnabled = animationsEnabled;
+  }
+
+  public patHead(direction: number): void {
+    if (this.privacyMode || this.catBreed === 'dafeiyu') return;
+    const now = performance.now();
+    this.wakeCat(now, 'gentle');
+    this.wakeAt = -10000;
+    this.isCross = false;
+    this.annoy = 0;
+    this.petGesture.tap(now, direction);
+  }
+
   private readonly renderFrame = (now: number): void => {
     const frameId = this.rafId;
     const workStart = performance.now();
@@ -943,7 +979,7 @@ export class KuroCatEngine {
     this.onAfterRender?.();
 
     if (this.rafId !== frameId) return;
-    const active = now - this.lastActivityAt < IDLE_RENDER_AFTER_MS;
+    const active = now - this.lastActivityAt < IDLE_RENDER_AFTER_MS || this.idleStretch > 0;
 
     if (this.sleepAmount > 0.96) {
       if (!this.sleepTrimSent) {
@@ -1635,6 +1671,9 @@ export class KuroCatEngine {
 
           // Only unlock petting energy & purring after intentional back-and-forth / circular strokes (Fixes #13)
           if (this.petStrokeCount >= REQUIRED_STROKES) {
+            if (this.idleDelayMs !== undefined && !this.privacyMode && this.catBreed !== 'dafeiyu') {
+              this.petGesture.stroke(now, dx / 10);
+            }
             this.petEnergy = Math.min(1, this.petEnergy + dist * 0.015);
             this.wakeCat(now, 'gentle');
             this.wakeAt = -10000;
@@ -1841,9 +1880,14 @@ export class KuroCatEngine {
     const isCatMode = this.catBreed !== 'dafeiyu';
 
     // 1) Alive cat emotional states: sleep (loaf + Zzz), curious (laser-pointer eyes), annoy -> cross (airplane ears + tail desk-thump), idle fidgets!
-    const sleepAfterMs = this.embedded ? 18_000 : 28_000;
+    const sleepAfterMs = this.idleDelayMs ?? (this.embedded ? 18_000 : 28_000);
     const idleMs = now - this.lastInputAt;
-    if (isCatMode && !this.privacyMode && !this.asleep && this.petEnergy < 0.15 && idleMs > sleepAfterMs) {
+    const canSleep = isCatMode && !this.privacyMode && this.petEnergy < 0.15;
+    const canStretch = this.idleDelayMs !== undefined && this.idleAnimationsEnabled && !this.gameActive;
+    const sleep = this.sleepTransition.update(canSleep ? idleMs : 0, sleepAfterMs, canStretch, canSleep && this.asleep);
+    this.idleStretch = sleep.stretch;
+    this.sleepTail = sleep.sleepTail;
+    if (sleep.asleep && !this.asleep) {
       this.asleep = true;
       this.isCross = false;
       this.idleAct = null;
@@ -1904,11 +1948,13 @@ export class KuroCatEngine {
     this.crossAmount = Math.max(0, Math.min(1, this.crossSpring.step(crossTarget, dt)));
 
     // Idle fidgets when calmly awake and idle > 2.6s (tilt, single-ear flick, affectionate slowBlink, look around, tail flick)
-    if (this.idleAct && now > this.idleAct.t0 + this.idleAct.dur) {
+    if (this.idleAct && (!this.idleAnimationsEnabled || this.idleStretch > 0 || now > this.idleAct.t0 + this.idleAct.dur)) {
       this.idleAct = null;
     }
     if (
       isCatMode &&
+      this.idleAnimationsEnabled &&
+      this.idleStretch === 0 &&
       !this.idleAct &&
       now >= this.nextIdleActAt &&
       idleMs > 2600 &&
@@ -1944,10 +1990,14 @@ export class KuroCatEngine {
     };
     const actEnv = act ? smoothstep(0, 0.25, actU) * (1 - smoothstep(0.7, 1, actU)) : 0;
 
+    if (this.privacyMode || this.asleep) this.petGesture.clear();
+    const petPose = this.petGesture.pose(now);
+    this.petTail = petPose.tail;
+
     // 2) Staggered 240Hz spring posture (body & hunch follow a beat behind head & eyes!)
     const targetHunch = isTypingRecently
       ? 0.45 + this.typingEnergy * 0.55
-      : curiousClamped * 0.28;
+      : curiousClamped * 0.28 + this.idleStretch * 0.7;
     this.typingHunch = Math.max(0, Math.min(1.2, this.hunchSpring.step(targetHunch, dt)));
     this.squashSpring.step(this.sleepAmount * 0.35 - curiousClamped * 0.25, dt);
 
@@ -1984,7 +2034,7 @@ export class KuroCatEngine {
       const tailDir = Math.max(-1, Math.min(1, (this.catTail.tipX - this.catCenterX) / (this.kbWidth * 0.5)));
       targetLean = tailDir * 0.14 * this.catTail.reach;
     }
-    this.spineLean = this.spineLeanSpring.step(targetLean, dt);
+    this.spineLean = this.spineLeanSpring.step(targetLean + petPose.lean * 0.40, dt);
 
     // Stable neutral eye reference (no feedback wobble when spine leans toward the mouse!)
     const eyeRefRelX = this.catCenterX / this.logicalW;
@@ -2010,17 +2060,19 @@ export class KuroCatEngine {
       this.spineLean * 0.085 +
       fidgetTilt +
       curiousCock +
-      sleepTilt;
+      sleepTilt + petPose.lean * 0.23 + this.idleStretch * 0.09;
     this.headTilt = this.headTiltSpring.step(desiredHeadTilt, dt) + wakeShake;
 
     this.petEnergy = Math.max(0, this.petEnergy - dt * (this.cursorOverCat ? 0.22 : 1.15));
     this.lastDt = dt;
-    const wantSquint = this.petEnergy > 0.3 && !this.isCross ? 1 : 0;
+    const purring = this.petEnergy > 0.3 && !this.isCross;
+    const wantSquint = purring ? 1 : Math.max(petPose.tap, this.idleStretch * 0.7);
     this.squintAmount += (wantSquint - this.squintAmount) * (1 - Math.exp(-12 * dt));
     const wantPrivacy = this.privacyMode ? 1 : 0;
     this.privacyClose += (wantPrivacy - this.privacyClose) * (1 - Math.exp(-14 * dt));
+    this.purrAmount += ((purring ? 1 : 0) - this.purrAmount) * (1 - Math.exp(-12 * dt));
     catAudio.setPurrIntensity(
-      this.catBreed !== 'dafeiyu' && !this.privacyMode && this.squintAmount > 0.25 ? this.squintAmount : 0,
+      this.catBreed !== 'dafeiyu' && !this.privacyMode && this.purrAmount > 0.25 ? this.purrAmount : 0,
     );
 
     // Dynamic ear spring (5.2Hz, damping 0.36): perks up when curious/excited, flattens into airplane ears when cross!
@@ -2029,7 +2081,7 @@ export class KuroCatEngine {
         0.16 * curiousClamped -
         0.18 * this.squintAmount -
         0.58 * this.crossAmount -
-        0.12 * this.sleepAmount
+        0.12 * this.sleepAmount + petPose.ear * 0.48
       : 0;
     this.earPerkSpring.step(earTarget, dt);
 
@@ -2530,7 +2582,7 @@ export class KuroCatEngine {
     const now = performance.now();
     const act = this.idleAct;
     const actU = act ? Math.max(0, Math.min(1, (now - act.t0) / act.dur)) : 0;
-    const tailFlick = act && act.kind === 'tail' ? Math.sin(actU * Math.PI * 2) * 7.5 : 0;
+    const tailFlick = (act?.kind === 'tail' ? Math.sin(actU * Math.PI * 2) * 7.5 : 0) + this.petTail * 24;
     const curiousTwitch =
       this.curiousAmount > 0.05
         ? Math.sin(this.elapsed * 14.5) * 4.2 * Math.min(1, this.curiousAmount)
@@ -2564,6 +2616,9 @@ export class KuroCatEngine {
       restEndX += (slEndX - restEndX) * sl;
       restEndY += (slEndY - restEndY) * sl;
     }
+
+    restEndX += this.sleepTail * 6;
+    restEndY += this.sleepTail * 8;
 
     // Grumpy 3-beat desk-thump pose when cross (lifts up smoothly, slams down onto desk!)
     const r = Math.max(0, Math.min(1, this.catTail.reach));
@@ -4255,7 +4310,14 @@ export class KuroCatEngine {
     // 1) Seated idle vertical front legs (EXACT 4 clean lines of ORIG 0.3s!) OR planted diagonal supporting leg (ORIG 2.2s!)
     if (paw.idleWeight > 0.05) {
       ctx.save();
-      ctx.globalAlpha = paw.idleWeight;
+      if (this.idleStretch > 0.01) {
+        const shoulder = this.getLiveShoulder(paw, breath);
+        const base = this.spinePoint(1, breath);
+        const side = paw.side === 'left' ? -1 : 1;
+        ctx.globalAlpha = paw.idleWeight * this.idleStretch;
+        this.drawPlumpCatArm(ctx, paw.side, shoulder.x, shoulder.y, base.x + side * 42, base.y + 16, 0, true);
+      }
+      ctx.globalAlpha = paw.idleWeight * (1 - this.idleStretch);
 
       if (paw.side === 'right' && this.leftPaw.mode === 'mouse') {
         const sh = this.getLiveShoulder(paw, breath);

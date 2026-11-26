@@ -80,6 +80,18 @@ pub fn normalize_fps_cap(raw: u16) -> u16 {
     }
 }
 
+fn default_idle_delay_seconds() -> u16 {
+    15
+}
+
+fn default_idle_animations_enabled() -> bool {
+    true
+}
+
+pub fn normalize_idle_delay_seconds(seconds: u16) -> u16 {
+    seconds.clamp(5, 600)
+}
+
 pub fn default_language() -> String {
     "auto".to_string()
 }
@@ -205,6 +217,10 @@ pub struct AppSettings {
     pub headphone_mode: String,
     #[serde(default = "default_fps_cap")]
     pub fps_cap: u16,
+    #[serde(default = "default_idle_delay_seconds")]
+    pub idle_delay_seconds: u16,
+    #[serde(default = "default_idle_animations_enabled")]
+    pub idle_animations_enabled: bool,
     #[serde(default = "default_language")]
     pub language: String,
 }
@@ -239,6 +255,8 @@ impl Default for AppSettings {
             collar_color: default_collar_color(),
             headphone_mode: default_headphone_mode(),
             fps_cap: default_fps_cap(),
+            idle_delay_seconds: default_idle_delay_seconds(),
+            idle_animations_enabled: default_idle_animations_enabled(),
             language: default_language(),
         }
     }
@@ -285,6 +303,7 @@ pub fn load_settings() -> AppSettings {
             parsed.collar_color = normalize_collar_color(&parsed.collar_color);
             parsed.headphone_mode = normalize_headphone_mode(&parsed.headphone_mode);
             parsed.fps_cap = normalize_fps_cap(parsed.fps_cap);
+            parsed.idle_delay_seconds = normalize_idle_delay_seconds(parsed.idle_delay_seconds);
             parsed.language = normalize_language(&parsed.language);
             return parsed;
         }
@@ -539,7 +558,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_settings_json_deserializes_with_tail_defaults() {
+    fn legacy_settings_json_deserializes_with_tail_and_idle_defaults() {
         let legacy = r#"{
             "x": null,
             "y": null,
@@ -553,5 +572,24 @@ mod tests {
         let parsed: AppSettings = serde_json::from_str(legacy).expect("legacy json should parse");
         assert_eq!(parsed.tail_key_mode, "smart");
         assert_eq!(parsed.tail_key_ids, default_tail_key_ids());
+        assert_eq!(parsed.idle_delay_seconds, 15);
+        assert!(parsed.idle_animations_enabled);
+    }
+
+    #[test]
+    fn idle_preferences_round_trip_and_delay_is_bounded() {
+        let settings = AppSettings {
+            idle_delay_seconds: 42,
+            idle_animations_enabled: false,
+            ..AppSettings::default()
+        };
+        let json = serde_json::to_value(&settings).unwrap();
+        assert_eq!(json["idleDelaySeconds"], 42);
+        assert_eq!(json["idleAnimationsEnabled"], false);
+        let parsed: AppSettings = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.idle_delay_seconds, 42);
+        assert!(!parsed.idle_animations_enabled);
+        assert_eq!(normalize_idle_delay_seconds(0), 5);
+        assert_eq!(normalize_idle_delay_seconds(1000), 600);
     }
 }

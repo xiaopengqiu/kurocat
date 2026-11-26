@@ -1,4 +1,5 @@
 import './style.css';
+import { bindIdleControls, syncIdleControls } from './idlePreferences';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { DEFAULT_TAIL_KEY_IDS, type KeyboardOrientation, type TailKeyMode } from './catEngine';
@@ -37,6 +38,8 @@ interface AppSettings {
   collarColor?: 'none' | 'red' | 'blue' | 'pink' | 'green';
   headphoneMode?: 'auto' | 'on' | 'off';
   fpsCap?: number;
+  idleDelaySeconds?: number;
+  idleAnimationsEnabled?: boolean;
   language?: string;
 }
 
@@ -191,6 +194,7 @@ function renderBreedPills(): void {
 }
 
 function syncUI(): void {
+  syncIdleControls(settings);
   setActiveLocale(settings.language, resolvedBackendLocale);
   applyDomTranslations();
 
@@ -470,6 +474,7 @@ async function triggerManualUpdateCheck(): Promise<void> {
 }
 
 async function bootstrap(): Promise<void> {
+  bindIdleControls(() => settings, applySettingsPatch);
   if (isMacPlatform()) {
     const shortcutBtn = document.getElementById('btn-desktop-shortcut');
     if (shortcutBtn) shortcutBtn.classList.add('hidden');

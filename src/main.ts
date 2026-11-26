@@ -1,4 +1,6 @@
 import './style.css';
+import { bindIdleControls, syncIdleControls } from './idlePreferences';
+import { idleDelaySeconds, isHeadTap } from './petInteraction';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -56,6 +58,8 @@ interface AppSettings {
   collarColor?: CollarColorId;
   headphoneMode?: HeadphoneMode;
   fpsCap?: number;
+  idleDelaySeconds?: number;
+  idleAnimationsEnabled?: boolean;
   language?: string;
 }
 
@@ -342,6 +346,7 @@ function syncEngine3DState(): void {
   engine3d.setTailKeyConfig(tailMode, tailIds);
   engine3d.setPrivacyMode(privacyActive);
   engine3d.setFpsCap(settings.fpsCap === 30 ? 30 : 0);
+  engine3d.setIdlePreferences(idleDelaySeconds(settings.idleDelaySeconds), settings.idleAnimationsEnabled !== false);
   engine3d.resize();
 }
 
@@ -465,6 +470,7 @@ function updateScaleSliderVisual(scaleVal: number): void {
 }
 
 function syncMenuUI(): void {
+  syncIdleControls(settings);
   setActiveLocale(settings.language, resolvedBackendLocale);
   applyDomTranslations();
 
@@ -573,6 +579,10 @@ function syncMenuUI(): void {
   engine.setKeyboardConfig(kbLayout, kbOrient);
   engine.setTailKeyConfig(tailMode, tailIds);
   engine.setFpsCap(fpsCapNum);
+  const idleDelay = idleDelaySeconds(settings.idleDelaySeconds);
+  const idleAnimations = settings.idleAnimationsEnabled !== false;
+  engine.setIdlePreferences(idleDelay, idleAnimations);
+  engine3d?.setIdlePreferences(idleDelay, idleAnimations);
   engine3d?.setFpsCap(fpsCapNum);
   if (!sliderDragging) {
     engine.setRenderScale(settings.scale);
@@ -1021,6 +1031,7 @@ async function triggerManualUpdateCheck(): Promise<void> {
 }
 
 async function bootstrap(): Promise<void> {
+  bindIdleControls(() => settings, applySettingsPatch);
   engine.start();
 
   // Hide Windows-only desktop shortcut button on macOS
@@ -1195,6 +1206,45 @@ async function bootstrap(): Promise<void> {
     if (preset) applyTailPreset(preset);
   });
 
+  let headPress: {
+    at: number;
+    screenX: number;
+    screenY: number;
+    moved: boolean;
+    released: boolean;
+    direction: number;
+    target: KuroCatEngine | KuroCatEngine3D;
+  } | null = null;
+  const releaseHeadPress = () => {
+    const press = headPress;
+    if (!press || press.released) return;
+    press.released = true;
+    const duration = performance.now() - press.at;
+    // Finish after any native window-moved event from the drag has arrived.
+    window.setTimeout(() => {
+      if (headPress !== press) return;
+      headPress = null;
+      const target = active3d && engine3d ? engine3d : engine;
+      if (press.target !== target || privacyActive || tailPickerOpen) return;
+      if (settings.clickThroughLocked && !altOverride) return;
+      if (isHeadTap(duration, press.moved)) target.patHead(press.direction);
+    }, 50);
+  };
+  const trackHeadPress = (ev: MouseEvent) => {
+    if (headPress && Math.hypot(ev.screenX - headPress.screenX, ev.screenY - headPress.screenY) > 5) {
+      headPress.moved = true;
+    }
+  };
+  window.addEventListener('mousemove', trackHeadPress);
+  window.addEventListener('mouseup', (ev) => {
+    if (ev.button !== 0) return;
+    trackHeadPress(ev);
+    releaseHeadPress();
+  });
+  await getCurrentWindow().onMoved(() => {
+    if (headPress) headPress.moved = true;
+  });
+
   await listen<InputEvent>('kuro-input', (ev) => {
     const p = ev.payload;
     switch (p.kind) {
@@ -1228,6 +1278,7 @@ async function bootstrap(): Promise<void> {
         else engine.onMouseDown(p.button);
         break;
       case 'mouseUp':
+        if (p.button === 'left') releaseHeadPress();
         if (active3d && engine3d) engine3d.onMouseUp(p.button);
         else engine.onMouseUp(p.button);
         break;
@@ -1315,6 +1366,12 @@ async function bootstrap(): Promise<void> {
         }
       }
       if (settings.clickThroughLocked && !altOverride && !e.altKey) return;
+      const target = active3d && engine3d ? engine3d : engine;
+      const direction = tailPickerOpen || privacyActive ? null : target.headPatDirection(e.clientX, e.clientY);
+      headPress = direction === null ? null : {
+        at: performance.now(), screenX: e.screenX, screenY: e.screenY,
+        moved: false, released: false, direction, target,
+      };
       canvas.classList.add('pet-dragging');
       canvas3d.classList.add('pet-dragging');
       void invoke('set_dragging', { dragging: true });

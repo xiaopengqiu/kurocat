@@ -162,6 +162,20 @@
             </div>
           </div>
 
+          <div class="menu-scale-row">
+            <div class="idle-setting-row">
+              <label class="menu-scale-label" for="idle-delay-seconds" data-i18n="menu.idle_delay">待机等待时间</label>
+              <div class="idle-setting-value">
+                <input id="idle-delay-seconds" type="number" min="5" max="600" step="1" value="15" aria-describedby="idle-delay-unit" />
+                <span id="idle-delay-unit" data-i18n="menu.idle_seconds">秒</span>
+              </div>
+            </div>
+            <label class="idle-setting-row menu-scale-label" for="idle-animations-enabled">
+              <span data-i18n="menu.idle_animations">待机动作</span>
+              <input id="idle-animations-enabled" type="checkbox" checked />
+            </label>
+          </div>
+
           <div class="menu-sep"></div>
 
           <button class="menu-item" data-action="toggle-obs">
