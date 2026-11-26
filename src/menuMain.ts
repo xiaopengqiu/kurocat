@@ -50,6 +50,7 @@ interface UpdateInfo {
   releaseUrl: string;
   assetName: string | null;
   downloadUrl: string | null;
+  downloadApiUrl?: string | null;
   assetSha256: string | null;
   assetSize: number | null;
   installKind: string;
@@ -94,7 +95,7 @@ let settings: AppSettings = {
 let catList: CatSkinConfig[] = [...DEFAULT_BUILTIN_CATS];
 let resolvedBackendLocale: string | null = null;
 let sliderDragging = false;
-let currentAppVersion = '5.1.3';
+let currentAppVersion = '5.1.4';
 let cachedUpdateInfo: UpdateInfo | null = null;
 let updateBusy = false;
 let activeTab: MenuTabId = 'appearance';

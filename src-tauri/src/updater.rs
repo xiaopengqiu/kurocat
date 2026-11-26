@@ -33,6 +33,8 @@ pub struct UpdateInfo {
     pub release_url: String,
     pub asset_name: Option<String>,
     pub download_url: Option<String>,
+    #[serde(default)]
+    pub download_api_url: Option<String>,
     pub asset_sha256: Option<String>,
     pub asset_size: Option<u64>,
     pub install_kind: String,
@@ -58,6 +60,7 @@ struct GhRelease {
 
 #[derive(Debug, Deserialize)]
 struct GhAsset {
+    id: Option<u64>,
     name: String,
     browser_download_url: String,
     size: Option<u64>,
@@ -683,6 +686,9 @@ pub fn check_latest_update() -> Result<UpdateInfo, String> {
             .unwrap_or_else(|| REPO_RELEASES_PAGE.to_string()),
         asset_name: asset.map(|a| a.name.clone()),
         download_url: asset.map(|a| a.browser_download_url.clone()),
+        download_api_url: asset.and_then(|a| a.id).map(|id| {
+            format!("https://api.github.com/repos/xiaopengqiu/kurocat/releases/assets/{id}")
+        }),
         asset_sha256: asset.and_then(|a| extract_sha256(&a.digest)),
         asset_size: asset.and_then(|a| a.size),
         install_kind: install_kind.to_string(),
@@ -956,43 +962,43 @@ fn install_macos_update(app: &AppHandle, info: &UpdateInfo) -> Result<(), String
     std::fs::create_dir_all(&temp_dir).map_err(|e| e.to_string())?;
     let archive_path = temp_dir.join("KuroCat-update.app.tar.gz");
 
-    let dl = Command::new("/usr/bin/curl")
-        .args([
-            "-fsSL",
-            "--connect-timeout",
-            "15",
-            "--max-time",
-            "240",
-            "-H",
-            &format!("User-Agent: KuroCat/{}", CURRENT_VERSION),
-            "-o",
-            archive_path.to_str().unwrap_or("/tmp/KuroCat-update.app.tar.gz"),
-            url,
-        ])
-        .output()
-        .map_err(|e| format!("下载失败: {}", e))?;
-
-    if !dl.status.success() {
-        return Err("下载 macOS 更新包失败".to_string());
-    }
-
-    // Verify SHA-256 if GitHub Release provided a digest
-    if let Some(expected_sha) = info.asset_sha256.as_deref() {
-        emit_progress(
-            app,
-            "verifying",
-            "正在校验安装包完整性...",
-            Some(info.clone()),
-        );
+    let expected_sha = info.asset_sha256.as_deref()
+        .ok_or_else(|| "GitHub Release 缺少 macOS 更新包的 SHA-256".to_string())?;
+    let mut verified = false;
+    for download_url in [info.download_api_url.as_deref(), Some(url)].into_iter().flatten() {
+        let status = Command::new("/usr/bin/curl")
+            .args([
+                "-fsSL",
+                "--proto", "=https", "--proto-redir", "=https",
+                "--connect-timeout", "15", "--max-time", "600",
+                "--speed-time", "45", "--speed-limit", "1024",
+                "-H", &format!("User-Agent: KuroCat/{}", CURRENT_VERSION),
+                "-H", "Accept: application/octet-stream",
+                "-o",
+            ])
+            .arg(&archive_path)
+            .arg(download_url)
+            .output()
+            .map_err(|e| format!("下载失败: {}", e))?;
+        if !status.status.success() {
+            continue;
+        }
+        emit_progress(app, "verifying", "正在校验安装包完整性...", Some(info.clone()));
         let shasum = Command::new("/usr/bin/shasum")
-            .args(["-a", "256", archive_path.to_str().unwrap_or("")])
+            .args(["-a", "256"])
+            .arg(&archive_path)
             .output()
             .map_err(|e| format!("校验失败: {}", e))?;
-        let out_str = String::from_utf8_lossy(&shasum.stdout);
-        let actual = out_str.split_whitespace().next().unwrap_or("").to_ascii_lowercase();
-        if actual != expected_sha.to_ascii_lowercase() {
-            return Err("安装包 SHA-256 校验未通过".to_string());
+        let out = String::from_utf8_lossy(&shasum.stdout);
+        let digest_matches = out.split_whitespace().next()
+            .is_some_and(|sha| sha.eq_ignore_ascii_case(expected_sha));
+        if shasum.status.success() && digest_matches {
+            verified = true;
+            break;
         }
+    }
+    if !verified {
+        return Err("下载或校验 macOS 更新包失败".to_string());
     }
 
     let extract_dir = temp_dir.join("extracted");
@@ -1260,5 +1266,7 @@ mod tests {
         let info = check_latest_update().expect("native WinHTTP release check should succeed");
         assert!(!info.latest_version.is_empty());
         assert!(info.download_url.is_some());
+        assert!(info.download_api_url.is_some());
+        assert!(info.asset_sha256.is_some());
     }
 }

@@ -87,6 +87,7 @@ interface UpdateInfo {
   releaseUrl: string;
   assetName: string | null;
   downloadUrl: string | null;
+  downloadApiUrl?: string | null;
   assetSha256: string | null;
   assetSize: number | null;
   installKind: string;
@@ -118,7 +119,7 @@ function saveDismissedVersion(version: string): void {
   }
 }
 
-let appVersion = '5.1.3';
+let appVersion = '5.1.4';
 let latestUpdateInfo: UpdateInfo | null = null;
 let updateBusy = false;
 let dismissedVersion: string | null = loadDismissedVersion();
