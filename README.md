@@ -46,6 +46,12 @@
   </tr>
 </table>
 
+## 本仓库的 macOS 发布
+
+在 [xiaopengqiu/kurocat Releases](https://github.com/xiaopengqiu/kurocat/releases/latest) 下载本仓库的 macOS DMG。安装后，可通过托盘菜单的「检查更新」升级到本仓库的后续正式版本。
+
+发布时同步递增 `package.json`、`package-lock.json`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock` 和 `src-tauri/tauri.conf.json` 的版本，然后给发布提交打上对应的 `vX.Y.Z` 标签并推送标签。GitHub Actions 会构建并发布 macOS DMG 和客户端使用的 `.app.tar.gz`。
+
 ## 📥 直接下载使用（Windows / Win7 / macOS / Linux）
 
 前往 [Releases](https://github.com/qianyiai/kurocat/releases) 页面或直接点击下方最新 **`v5.1.2`** 安装包下载（全新升级 **🤖 AI 伴侣实时状态联动（豆包工作版 / WorkBuddy / DeepSeek Harness / Codex / 千问 / Antigravity / Claude Code 一键接入，写代码自动代打 + 待确认/出错/完工弹窗提醒）**、**MCP 2D/3D 脸型耳型自由雕塑（10 项工具 + 16 斑点）**、**2D/3D 切换 & WebGL 释放自愈 + 侧边菜单首次点击秒响应**、**跨平台单实例防多开 & Win11 更新锁文件修复 & macOS 唤醒/拖拽/Linux 缩放修复**，并完整保留 **✨ 3D 立体手办 / 🎨 2D 经典双引擎**、**5 语言多语言**、**OBS 透明直播源** 与 **密码防偷窥**）：

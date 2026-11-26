@@ -3,9 +3,8 @@ use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use tauri::{AppHandle, Emitter};
 
-const QIANYI_API_LATEST: &str = "https://qianyi.one/kurocat/releases/latest.json";
-const REPO_API_LATEST: &str = "https://api.github.com/repos/qianyiai/kurocat/releases/latest";
-const REPO_RELEASES_PAGE: &str = "https://github.com/qianyiai/kurocat/releases/latest";
+const REPO_API_LATEST: &str = "https://api.github.com/repos/xiaopengqiu/kurocat/releases/latest";
+const REPO_RELEASES_PAGE: &str = "https://github.com/xiaopengqiu/kurocat/releases/latest";
 
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -162,14 +161,16 @@ fn select_asset<'a>(assets: &'a [GhAsset], install_kind: &str) -> Option<&'a GhA
             let n = a.name.to_ascii_lowercase();
             n.contains("win7") && n.ends_with(".zip")
         }),
-        "macos-app" => assets
-            .iter()
-            .find(|a| a.name.to_ascii_lowercase().ends_with("-macos-universal.app.tar.gz"))
-            .or_else(|| {
-                assets
-                    .iter()
-                    .find(|a| a.name.to_ascii_lowercase().ends_with("-macos-universal.dmg"))
-            }),
+        "macos-app" => {
+            let arch = if cfg!(target_arch = "aarch64") { "arm64" } else { "x64" };
+            ["app.tar.gz", "dmg"].iter().find_map(|extension| {
+                let universal = format!("-macos-universal.{extension}");
+                let native = format!("-macos-{arch}.{extension}");
+                [universal, native].iter().find_map(|suffix| {
+                    assets.iter().find(|asset| asset.name.to_ascii_lowercase().ends_with(suffix))
+                })
+            })
+        }
         "linux-deb-arm64" => assets
             .iter()
             .find(|a| {
@@ -606,13 +607,6 @@ fn fetch_json_from_url(url: &str, accept: Option<&str>, timeout_ms: i32) -> Resu
 
 #[cfg(windows)]
 fn fetch_latest_release_json() -> Result<String, String> {
-    // Primary: fast domestic CDN mirror (no proxy needed, zero GitHub API rate limit)
-    if let Ok(text) = fetch_json_from_url(QIANYI_API_LATEST, Some("Accept: application/json\r\n"), 8_000) {
-        if serde_json::from_str::<GhRelease>(&text).is_ok() {
-            return Ok(text);
-        }
-    }
-    // Fallback: official GitHub Releases API
     fetch_json_from_url(
         REPO_API_LATEST,
         Some("Accept: application/vnd.github+json\r\n"),
@@ -663,13 +657,6 @@ fn fetch_json_from_url(url: &str, accept: &str, connect_secs: &str, max_secs: &s
 
 #[cfg(not(windows))]
 fn fetch_latest_release_json() -> Result<String, String> {
-    // Primary: fast domestic CDN mirror (no proxy needed, zero GitHub API rate limit)
-    if let Ok(text) = fetch_json_from_url(QIANYI_API_LATEST, "Accept: application/json", "5", "9") {
-        if serde_json::from_str::<GhRelease>(&text).is_ok() {
-            return Ok(text);
-        }
-    }
-    // Fallback: official GitHub Releases API
     fetch_json_from_url(REPO_API_LATEST, "Accept: application/vnd.github+json", "10", "20")
 }
 
@@ -1169,6 +1156,23 @@ mod tests {
     }
 
     #[test]
+    fn release_urls_use_the_distribution_repository() {
+        assert_eq!(REPO_API_LATEST, "https://api.github.com/repos/xiaopengqiu/kurocat/releases/latest");
+        assert_eq!(REPO_RELEASES_PAGE, "https://github.com/xiaopengqiu/kurocat/releases/latest");
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn macos_selects_the_arm64_archive_for_one_click_update() {
+        let assets: Vec<GhAsset> = serde_json::from_str(r#"[
+            {"name":"KuroCat-v5.1.3-macos-arm64.dmg","browser_download_url":"https://github.com/example.dmg"},
+            {"name":"KuroCat-v5.1.3-macos-arm64.app.tar.gz","browser_download_url":"https://github.com/example.tar.gz"}
+        ]"#).unwrap();
+        assert_eq!(select_asset(&assets, "macos-app").map(|asset| asset.name.as_str()),
+            Some("KuroCat-v5.1.3-macos-arm64.app.tar.gz"));
+    }
+
+    #[test]
     fn sha256_extraction_validates_hex() {
         let valid = Some("sha256:05c1be2c444f5303770f6d59e216bc0ed7b69321fc44368e4ec231405570f950".to_string());
         assert_eq!(
@@ -1179,30 +1183,30 @@ mod tests {
     }
 
     #[test]
-    fn qianyi_mirror_latest_json_parses_assets_and_digest() {
+    fn github_release_json_parses_assets_and_digest() {
         let sample = r#"{
             "tag_name": "v9.9.9",
-            "html_url": "https://qianyi.one/kurocat/",
+            "html_url": "https://github.com/xiaopengqiu/kurocat/releases/",
             "body": "Performance & UX update",
             "assets": [
                 {
                     "name": "KuroCat-9.9.9-x64-setup.exe",
-                    "browser_download_url": "https://qianyi.one/kurocat/releases/v9.9.9/KuroCat-9.9.9-x64-setup.exe",
+                    "browser_download_url": "https://github.com/xiaopengqiu/kurocat/releases/download/v9.9.9/KuroCat-9.9.9-x64-setup.exe",
                     "size": 2250000,
                     "digest": "sha256:05c1be2c444f5303770f6d59e216bc0ed7b69321fc44368e4ec231405570f950"
                 },
                 {
                     "name": "KuroCat-9.9.9-macos-universal.app.tar.gz",
-                    "browser_download_url": "https://qianyi.one/kurocat/releases/v9.9.9/KuroCat-9.9.9-macos-universal.app.tar.gz",
+                    "browser_download_url": "https://github.com/xiaopengqiu/kurocat/releases/download/v9.9.9/KuroCat-9.9.9-macos-universal.app.tar.gz",
                     "size": 3100000,
                     "digest": "sha256:05c1be2c444f5303770f6d59e216bc0ed7b69321fc44368e4ec231405570f950"
                 }
             ]
         }"#;
-        let rel: GhRelease = serde_json::from_str(sample).expect("parse mirror json");
+        let rel: GhRelease = serde_json::from_str(sample).expect("parse release JSON");
         assert!(is_newer_version(&rel.tag_name, CURRENT_VERSION));
         let win_asset = select_asset(&rel.assets, "windows-nsis").expect("select win nsis");
-        assert!(win_asset.browser_download_url.starts_with("https://qianyi.one/"));
+        assert!(win_asset.browser_download_url.starts_with("https://github.com/xiaopengqiu/kurocat/releases/"));
         assert_eq!(
             extract_sha256(&win_asset.digest).as_deref(),
             Some("05c1be2c444f5303770f6d59e216bc0ed7b69321fc44368e4ec231405570f950")
@@ -1236,11 +1240,11 @@ mod tests {
     #[test]
     fn http_url_parser_handles_github_endpoints() {
         let (https, host, port, path) =
-            parse_http_url("https://api.github.com/repos/qianyiai/kurocat/releases/latest").unwrap();
+            parse_http_url("https://api.github.com/repos/xiaopengqiu/kurocat/releases/latest").unwrap();
         assert!(https);
         assert_eq!(host, "api.github.com");
         assert_eq!(port, 443);
-        assert_eq!(path, "/repos/qianyiai/kurocat/releases/latest");
+        assert_eq!(path, "/repos/xiaopengqiu/kurocat/releases/latest");
 
         let (https2, host2, port2, path2) =
             parse_http_url("http://127.0.0.1:8080/dl?v=1").unwrap();
