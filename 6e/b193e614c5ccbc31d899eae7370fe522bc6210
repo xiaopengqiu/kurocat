@@ -1,0 +1,58 @@
+src-tauri/src/config.rs
+  s_cf81f22f71dfa9::t_45c88f82c10e12 83-94,220-223,258-259,306,561,575-593
+locales/zh-CN.json
+  s_cf81f22f71dfa9::t_8d14a7cdca3a02 54-56
+src/main.ts
+  s_cf81f22f71dfa9::t_f24614bead7bd4 2-3,61-62,349,473,582-585,1034,1209-1247,1281,1369-1374
+src/catEngine.ts
+  s_cf81f22f71dfa9::t_8d14a7cdca3a02 437-448,826,2073,2075
+  s_cf81f22f71dfa9::t_798600263c30fe 824,1885,1887,1889-1890,2620-2621
+  s_cf81f22f71dfa9::t_eadc5f73f56cdb 11,818-823,948-962,982,1674-1676,1883,1886,1888,1951,1956-1957,1993-1996,2000,2037,2063,2068-2069,2084,2585,4313-4320
+  s_cf81f22f71dfa9::t_2f2dcab63125e9 2622
+src-tauri/src/lib.rs
+  s_cf81f22f71dfa9::t_45c88f82c10e12 556
+locales/ja-JP.json
+  s_cf81f22f71dfa9::t_8d14a7cdca3a02 54-56
+src/style.css
+  s_cf81f22f71dfa9::t_8d14a7cdca3a02 179-210
+tests/pet-interaction.test.mjs
+  s_cf81f22f71dfa9::t_f687435827329f 1-34,37-61,75
+  s_cf81f22f71dfa9::t_e50da102186a6d 35-36,62-74
+locales/en-US.json
+  s_cf81f22f71dfa9::t_8d14a7cdca3a02 54-56
+menu.html
+  s_cf81f22f71dfa9::t_8d14a7cdca3a02 165-178
+locales/ko-KR.json
+  s_cf81f22f71dfa9::t_8d14a7cdca3a02 54-56
+locales/zh-TW.json
+  s_cf81f22f71dfa9::t_8d14a7cdca3a02 54-56
+index.html
+  s_cf81f22f71dfa9::t_8d14a7cdca3a02 182-195
+src/petInteraction.ts
+  s_cf81f22f71dfa9::t_204478689f9a5f 1-15,19-20,22-24,31,34,43,49-92,95,97-109
+  s_cf81f22f71dfa9::t_798600263c30fe 16-18,21,25-30,32-33,35-42,44-48,93-94,96
+src/idlePreferences.ts
+  s_cf81f22f71dfa9::t_8d14a7cdca3a02 1-33
+src/catEngine3d.ts
+  s_cf81f22f71dfa9::t_eadc5f73f56cdb 12,777-781,1780-1790,1792-1793,1869,2026,2217-2218,2230,2232,2509,2512,2515,2532,2534-2535,2574-2576,2578-2579,2630,2635,2637,2677-2680,2739,2767,2888
+  s_cf81f22f71dfa9::t_8d14a7cdca3a02 760,1791,2231,2262-2272,2370,2513,2533
+  s_cf81f22f71dfa9::t_798600263c30fe 2023-2025,2511,2514,2516,2849-2850
+src/menuMain.ts
+  s_cf81f22f71dfa9::t_f24614bead7bd4 2,41-42,197,477
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "6eb193e614c5ccbc31d899eae7370fe522bc6210",
+  "prompts": {},
+  "sessions": {
+    "s_cf81f22f71dfa9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a216dd-1586-7912-a029-67b51b18cd63",
+        "model": "gpt-6.2-sol"
+      },
+      "human_author": "裕琦 <qiuxiaopeng.qxp@antgroup.com>"
+    }
+  }
+}
