@@ -16,6 +16,8 @@ export interface AgentCompanionEvent {
   action?: AgentActionKind | string;
   source?: string;
   text?: string;
+  textIsDefault?: boolean;
+  errorKind?: 'tool' | 'task';
   tool?: string;
   autoType?: boolean;
   sound?: boolean;
@@ -41,6 +43,18 @@ const CODING_VKS: readonly number[] = [
   0x20, 0x0d, 0x08, 0xbc, 0xbe,
 ];
 
+const CAPTIONS = {
+  tool: ['这步没跑通', '执行遇到点问题', '这条指令卡住了'],
+  task: ['这轮卡住了', '任务在这里中断', '这次没跑完'],
+  recovery: ['继续处理', '接着来', '重新开始处理'],
+} as const;
+const ERROR_DEDUP_MS = 2_500;
+const RECOVERY_WINDOW_MS = 120_000;
+const RECOVERY_BUBBLE_MS = 3_200;
+
+type CaptionKind = keyof typeof CAPTIONS;
+type RecentError = { kind: 'tool' | 'task'; at: number; tool?: string; text?: string };
+
 export interface AgentCompanionOptions {
   bubbleEl: HTMLDivElement | null;
   getTarget: () => AgentCompanionTarget | null;
@@ -64,6 +78,9 @@ export class AgentCompanionController {
   private ttlTimer: number | null = null;
   private burstRemaining = 0;
   private lastSoundAt = 0;
+  private readonly recentErrors = new Map<string, RecentError>();
+  private readonly lastCaption: Partial<Record<CaptionKind, string>> = {};
+  private recoveryBubble: { source: string; text: string; until: number } | null = null;
 
   constructor(opts: AgentCompanionOptions) {
     this.bubbleEl = opts.bubbleEl;
@@ -75,6 +92,7 @@ export class AgentCompanionController {
   public setPrivacyMode(active: boolean): void {
     this.privacyPaused = Boolean(active);
     if (this.privacyPaused) {
+      this.recoveryBubble = null;
       this.releaseAllVirtualKeys();
       this.hideBubble();
     }
@@ -91,7 +109,23 @@ export class AgentCompanionController {
     if (!ev || typeof ev !== 'object') return;
     if (this.privacyPaused) return;
 
+    const now = performance.now();
+    const status = (ev.status || 'idle').toLowerCase() as AgentStatusKind;
+    const sourceKey = ev.source?.trim().toLowerCase() || 'ai';
+    const errorKind = ev.errorKind === 'tool' ? 'tool' : 'task';
+    const customText = ev.textIsDefault ? undefined : ev.text;
+    for (const [source, error] of this.recentErrors) {
+      if (now - error.at > RECOVERY_WINDOW_MS) this.recentErrors.delete(source);
+    }
+    const previousError = this.recentErrors.get(sourceKey);
+    if (ev.kind === 'status' && status === 'error' && this.activeStatus === 'error' &&
+        previousError?.kind === errorKind && previousError.tool === ev.tool && previousError.text === customText &&
+        now - previousError.at < ERROR_DEDUP_MS) return;
+
     this.clearTtlTimer();
+    if (ev.kind !== 'status' || status !== 'working' || this.recoveryBubble?.source !== sourceKey) {
+      this.recoveryBubble = null;
+    }
     const target = this.getTarget();
     const is3d = this.is3DTarget();
     const ttl = Math.max(1200, Math.min(300_000, ev.ttlMs ?? 6500));
@@ -120,7 +154,6 @@ export class AgentCompanionController {
       return;
     }
 
-    const status = (ev.status || 'idle').toLowerCase() as AgentStatusKind;
     this.activeStatus = status;
 
     switch (status) {
@@ -130,8 +163,35 @@ export class AgentCompanionController {
         } else {
           this.stopAutoTyping();
         }
-        this.showBubble(ev.source, ev.text || '写代码中…', 'working');
-        this.scheduleTtlClear(ev.ttlMs ?? 45_000);
+        const recovered = this.recentErrors.delete(sourceKey);
+        if (recovered) target?.triggerWakeDemo?.();
+        const workingText = ev.text || '写代码中…';
+        const workingTtl = ev.ttlMs ?? 45_000;
+        if (customText) {
+          this.recoveryBubble = null;
+        } else if (recovered) {
+          this.recoveryBubble = { source: sourceKey, text: this.pickCaption('recovery'), until: now + RECOVERY_BUBBLE_MS };
+        }
+        const recovery = this.recoveryBubble;
+        if (recovery && recovery.until > now) {
+          const remaining = recovery.until - now;
+          this.showBubble(ev.source, recovery.text, 'working');
+          if (remaining < workingTtl) {
+            this.scheduleTtlClear(remaining, () => {
+              if (this.recoveryBubble === recovery && !this.privacyPaused) {
+                this.showBubble(ev.source, workingText, 'working');
+              }
+              this.recoveryBubble = null;
+              this.scheduleTtlClear(workingTtl - remaining);
+            });
+          } else {
+            this.scheduleTtlClear(workingTtl);
+          }
+        } else {
+          this.recoveryBubble = null;
+          this.showBubble(ev.source, workingText, 'working');
+          this.scheduleTtlClear(workingTtl);
+        }
         break;
       }
       case 'thinking': {
@@ -156,6 +216,7 @@ export class AgentCompanionController {
         break;
       }
       case 'done': {
+        this.recentErrors.delete(sourceKey);
         this.stopAutoTyping();
         if (target?.triggerHappyDemo) {
           target.triggerHappyDemo(is3d ? 2.8 : 2800);
@@ -171,15 +232,18 @@ export class AgentCompanionController {
       }
       case 'error': {
         this.stopAutoTyping();
-        target?.triggerCrossDemo();
-        this.showBubble(ev.source, ev.text || '任务出错了', 'error');
+        this.recentErrors.set(sourceKey, { at: now, kind: errorKind, tool: ev.tool, text: customText });
+        if (errorKind === 'tool') target?.triggerCuriousDemo(is3d ? 1.5 : 1500);
+        else target?.triggerCrossDemo();
+        this.showBubble(ev.source, customText || this.pickCaption(errorKind), errorKind === 'tool' ? 'tool-error' : 'error');
         this.scheduleTtlClear(ev.ttlMs ?? 8_500);
-        if (ev.sound !== false && this.allowSound()) {
+        if ((errorKind === 'tool' ? ev.sound === true : ev.sound !== false) && this.allowSound()) {
           this.playNoticeThrottled('error');
         }
         break;
       }
       default: {
+        if (status === 'idle') this.recentErrors.delete(sourceKey);
         this.stopAutoTyping();
         if (ev.text) {
           this.showBubble(ev.source, ev.text, 'info');
@@ -190,6 +254,13 @@ export class AgentCompanionController {
         break;
       }
     }
+  }
+
+  private pickCaption(kind: CaptionKind): string {
+    const choices = CAPTIONS[kind].filter(text => text !== this.lastCaption[kind]);
+    const text = choices[Math.floor(Math.random() * choices.length)];
+    this.lastCaption[kind] = text;
+    return text;
   }
 
   private dispatchAction(
@@ -312,7 +383,7 @@ export class AgentCompanionController {
   private showBubble(
     source: string | undefined,
     text: string,
-    tone: 'working' | 'thinking' | 'waiting' | 'done' | 'error' | 'info',
+    tone: 'working' | 'thinking' | 'waiting' | 'done' | 'error' | 'tool-error' | 'info',
   ): void {
     const el = this.bubbleEl;
     if (!el) return;
@@ -327,8 +398,8 @@ export class AgentCompanionController {
             : tone === 'done'
               ? '✅'
               : tone === 'error'
-                ? '❌'
-                : '🐾';
+                ? '💢'
+                : tone === 'tool-error' ? '🛠️' : '🐾';
     el.dataset.tone = tone;
     el.textContent = `${icon} ${prefix}${text}`;
     el.classList.remove('hidden');
@@ -346,10 +417,15 @@ export class AgentCompanionController {
     }
   }
 
-  private scheduleTtlClear(ms: number): void {
+  private scheduleTtlClear(ms: number, next?: () => void): void {
     this.clearTtlTimer();
     this.ttlTimer = window.setTimeout(() => {
       this.ttlTimer = null;
+      if (next) {
+        next();
+        return;
+      }
+      this.recoveryBubble = null;
       this.activeStatus = 'idle';
       this.stopAutoTyping();
       this.hideBubble();
@@ -361,6 +437,8 @@ export class AgentCompanionController {
   }
 
   public dispose(): void {
+    this.recentErrors.clear();
+    this.recoveryBubble = null;
     this.clearTtlTimer();
     this.stopAutoTyping();
     this.hideBubble();

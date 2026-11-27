@@ -9,7 +9,7 @@ import type { KeyboardLayoutId } from './keyboardLayout';
 import type { KeyboardOrientation, TailKeyMode } from './catEngine';
 import { DEFAULT_TAIL_KEY_IDS } from './catEngine';
 import { catAudio } from './audio';
-import { PetGesture, SleepTransition } from './petInteraction';
+import { bendTail, gentleWakeAmount, idleTailSwing, isWakeBurst, pawSideAt, PetGesture, SleepTransition, type PawSide } from './petInteraction';
 import {
   FurShaderSystem,
   resolveFurPalette3D,
@@ -1784,11 +1784,17 @@ export class KuroCatEngine3D {
 
   public patHead(direction: number): void {
     if (this.privacyMode) return;
-    this.wake('gentle');
-    this.wakeAt = -100;
+    const sleepy = this.asleep || this.sleepAmt > 0.35;
+    this.wake();
     this.isCross = false;
     this.annoy = 0;
-    this.petGesture.tap(performance.now(), direction);
+    this.petGesture.tap(performance.now(), direction, sleepy ? 420 : 0);
+  }
+
+  public highFive(side: PawSide): void {
+    if (this.privacyMode) return;
+    this.wake();
+    this.petGesture.highFive(performance.now(), side);
   }
 
   public setFpsCap(cap: number): void {
@@ -1866,7 +1872,7 @@ export class KuroCatEngine3D {
       this.elapsed - this.lastInput < 3.0 ||
       this.elapsed - this.cursorActiveAt < 2.4 ||
       this.isCross ||
-      this.petting || this.idleStretch > 0 ||
+      this.petting || this.idleStretch > 0 || this.idleAct?.kind === 'tail' ||
       this.elapsed < this.curiousUntil ||
       this.popups.length > 0 ||
       this.fxList.some((fx) => fx.kind !== 'z') ||
@@ -2124,11 +2130,11 @@ export class KuroCatEngine3D {
     }
     const k = this.desk.resolveKey(vk);
     if (!k) return;
-    this.wake(repeat ? 'gentle' : 'abrupt');
+    if (!repeat) this.strokes.push(this.elapsed);
+    this.wake(!repeat && isWakeBurst(this.strokes, 0.27) ? 'abrupt' : 'gentle');
     if (repeat) return;
 
     this.lastKey = this.elapsed;
-    this.strokes.push(this.elapsed);
     const burst = this.strokes.filter((s) => this.elapsed - s < 0.18).length;
     if (burst >= 4) {
       this.pokeAnnoy(0.32);
@@ -2196,7 +2202,7 @@ export class KuroCatEngine3D {
       return;
     }
 
-    this.wake('abrupt');
+    this.wake();
     const gap = this.elapsed - this.lastSampleT;
     if (this.lastSampleX !== null && this.lastSampleY !== null && gap > 0 && gap <= 0.14) {
       const dist = Math.hypot(nx - this.lastSampleX, ny - this.lastSampleY);
@@ -2223,22 +2229,21 @@ export class KuroCatEngine3D {
       this.cursorActiveAt = this.elapsed;
       this.wakeRendering();
     }
-    if (overCat && !this.leftMouseDown && !this.rightMouseDown && delta > 0.006) {
+    if (overCat && !this.asleep && this.sleepAmt < 0.35 && !this.leftMouseDown && !this.rightMouseDown && delta > 0.006) {
       this.petting = true;
       this.petUntil = this.elapsed + 0.36;
       this.petX = clamp(this.cursorNdc.x * 2.0, -1, 1);
       if (this.idleDelayMs !== undefined && !this.privacyMode) {
         this.petGesture.stroke(performance.now(), dx * 36);
       }
-      this.wake('gentle');
-      this.wakeAt = -100;
+      this.wake();
       this.isCross = false;
       this.annoy = 0;
     }
   }
 
   public onMouseDown(btn: string): void {
-    this.wake('abrupt');
+    this.wake();
     this.lastMouse = this.elapsed;
     this.paws.L.lastActive = this.elapsed;
     if (btn === 'left') this.leftMouseDown = true;
@@ -2253,10 +2258,24 @@ export class KuroCatEngine3D {
   }
 
   public onMouseWheel(): void {
-    this.wake('abrupt');
+    this.wake();
     this.lastMouse = this.elapsed;
     this.paws.L.lastActive = this.elapsed;
     this.desk.pulseScrollWheel();
+  }
+
+  public pawTapSide(clientX: number, clientY: number): PawSide | null {
+    if (this.privacyMode) return null;
+    const rect = this.canvas.getBoundingClientRect();
+    if (rect.width < 4 || rect.height < 4) return null;
+    const [left, right] = this.arms;
+    if (!left || !right) return null;
+    const projectPaw = (paw: THREE.Object3D) => {
+      const point = paw.position.clone().project(this.camera);
+      return { x: rect.left + (1 + point.x) * rect.width / 2, y: rect.top + (1 - point.y) * rect.height / 2 };
+    };
+    return pawSideAt({ x: clientX, y: clientY }, projectPaw(left.paw), projectPaw(right.paw),
+      Math.min(rect.width, rect.height) * 0.032 * this.renderScale);
   }
 
   public headPatDirection(clientX: number, clientY: number): number | null {
@@ -2372,7 +2391,7 @@ export class KuroCatEngine3D {
     if (wasAsleep) {
       this.asleep = false;
       this.wakeAt = t;
-      this.sSquash.kick(-1.1);
+      this.sSquash.kick(mode === 'abrupt' ? -1.1 : -0.20);
     }
     if (mode === 'abrupt' && recentlyWoken && !this.privacyMode && !this.petting && !this.isCross) {
       // Grumpy wake-up ("起床气"): ~3.2s airplane ears + 3-beat tail desk-thump when rudely jolted from sleep!
@@ -2520,7 +2539,9 @@ export class KuroCatEngine3D {
       this.nextZ = t + 0.9;
     }
     const wantSleep = this.asleep && !this.privacyMode ? 1 : 0;
-    this.sleepAmt += (wantSleep - this.sleepAmt) * approach(wantSleep ? 1.5 : 6.5, dt);
+    const waking = !this.asleep && !this.isCross && t - this.wakeAt < 0.48;
+    const wakeMotion = waking ? gentleWakeAmount((t - this.wakeAt) * 1000) : 0;
+    this.sleepAmt += (wantSleep - this.sleepAmt) * approach(wantSleep ? 1.5 : waking ? 3.6 : 6.5, dt);
     if (this.sleepAmt < 0.002 && !wantSleep) this.sleepAmt = 0;
 
     this.privacyClose += ((this.privacyMode ? 1 : 0) - this.privacyClose) * approach(14, dt);
@@ -2537,7 +2558,7 @@ export class KuroCatEngine3D {
     // Curious trigger from swift cursor sweep
     this.pointerSamples = this.pointerSamples.filter((s) => t - s.t <= 0.22);
     const pointerSpeed = this.pointerSamples.reduce((a, s) => a + s.dist, 0) / 0.22;
-    const canCurious = !this.asleep && !this.privacyMode && !this.isCross && t - this.lastKey > 0.9;
+    const canCurious = !this.asleep && !waking && !this.privacyMode && !this.isCross && t - this.lastKey > 0.9;
     if (canCurious && this.pointerSamples.length >= 4 && pointerSpeed > 0.92) {
       this.curiousUntil = Math.max(this.curiousUntil, t + 2.2);
     }
@@ -2593,7 +2614,7 @@ export class KuroCatEngine3D {
         ear: 0.46,
         slowBlink: 1.45,
         look: 2.1,
-        tail: 1.1,
+        tail: 1.5,
       };
       this.idleAct = { kind, t0: t, dur: durMap[kind], side: Math.random() < 0.5 ? -1 : 1 };
       this.nextIdleAct = t + 3.8 + Math.random() * 4.5;
@@ -2625,9 +2646,10 @@ export class KuroCatEngine3D {
       targetShift = 0.08 * this.tailTap.reach;
     }
 
+    const fiveAmount = petPose.highFive?.amount ?? 0;
     const targetHunch = typingActive
       ? 0.09 + 0.08 * this.excite
-      : curious * 0.07 + (petActive ? -0.05 : 0) + this.idleStretch * 0.23;
+      : curious * 0.07 + (petActive ? -0.05 : 0) + this.idleStretch * 0.23 + fiveAmount * 0.10;
     const targetSquash =
       this.sleepAmt * 0.20 +
       (petActive ? 0.06 : 0) -
@@ -2690,12 +2712,10 @@ export class KuroCatEngine3D {
       targetGazeX = mix(targetGazeX, this.crossHuffDir * 0.72, cross * 0.65);
     }
 
-    const wakeEl = t - this.wakeAt;
-    const wakeShake = wakeEl >= 0 && wakeEl < 0.55 ? Math.sin(wakeEl * 36) * 0.20 * (1 - wakeEl / 0.55) : 0;
 
-    this.headRot.pitch = this.sPitch.step(targetPitch, dt);
+    this.headRot.pitch = this.sPitch.step(targetPitch - wakeMotion * 0.08, dt);
     this.headRot.yaw = this.sYaw.step(targetYaw, dt);
-    this.headRot.roll = this.sRoll.step(targetRoll, dt) + wakeShake;
+    this.headRot.roll = this.sRoll.step(targetRoll, dt);
 
     // Deform one-piece body+head smoothly & sync headMount + optional collar!
     this.deformCatBody();
@@ -2736,7 +2756,7 @@ export class KuroCatEngine3D {
     const earState = this.sEars.step(earTarget, dt);
     const earFlick = act && act.kind === 'ear' ? Math.sin(actU * Math.PI * 2) * 0.22 : 0;
     for (const e of this.ears) {
-      const flick = (act?.kind === 'ear' && act.side === e.s ? earFlick : 0) + petPose.ear * 0.42;
+      const flick = (act?.kind === 'ear' && act.side === e.s ? earFlick : 0) + petPose.ear * 0.42 + wakeMotion * 0.10;
       const airplaneFold = cross * 0.56;
       e.group.rotation.z = -e.s * (e.tilt + airplaneFold - earState * 0.28 + flick);
       e.group.rotation.x = -0.06 - cross * 0.14 + curious * 0.10;
@@ -2781,7 +2801,8 @@ export class KuroCatEngine3D {
 
       if (showOpenEye) {
         const irisRx = 0.156 * (1 + curious * 0.06);
-        const irisRy = Math.max(0.02, 0.136 * (1 + curious * 0.09) * (1 - blinkClose * 0.8));
+        const eyeClose = Math.max(blinkClose, this.sleepAmt * 1.65);
+        const irisRy = Math.max(0.02, 0.136 * (1 + curious * 0.09) * (1 - eyeClose * 0.8));
 
         const pRx = clamp(
           (0.064 + curious * 0.048 + this.excite * 0.008) * (1 - cross * 0.32),
@@ -2828,7 +2849,10 @@ export class KuroCatEngine3D {
 
     const swayRate = mix(1.0, 2.5, this.excite) * (1 - 0.75 * this.sleepAmt);
     this.tailPhase += dt * swayRate;
-    const tailSway = (1 - 0.7 * this.sleepAmt) * (1 + 0.42 * curious) + (act && act.kind === 'tail' ? 1.35 * actEnv : 0);
+    const tailSway = (1 - 0.7 * this.sleepAmt) * (1 + 0.42 * curious);
+    const swing = petPose.tail ?? (act?.kind === 'tail'
+      ? idleTailSwing((t - act.t0) * 1000, act.dur * 1000, act.side)
+      : null);
 
     const attached = this.tmpTailAttached;
     const loose = this.tmpTailLoose;
@@ -2846,12 +2870,14 @@ export class KuroCatEngine3D {
       }
       pt.x += Math.sin(this.tailPhase * 1.5 + i * 0.68) * 0.045 * w * tailSway;
       pt.y += Math.sin(this.tailPhase * 1.25 + i * 0.85) * 0.05 * w * w * tailSway;
-      pt.x += (petPose.tail * 0.21 + sleep.sleepTail * 0.06) * w * w;
-      pt.y += (petPose.tail * 0.28 + sleep.sleepTail * 0.08) * w * w;
+      pt.x += sleep.sleepTail * 0.06 * w * w;
+      pt.y += sleep.sleepTail * 0.08 * w * w;
       this.attachLocal(pt, attached);
       loose.copy(pt).add(this.homePos);
       pt.lerpVectors(attached, loose, smoothstep(0.1, 0.7, w));
     }
+
+    if (swing) bendTail(this.tailCurve.points, swing, 1 - cross);
 
     if (this.tailTap.reach > 0.01 && this.tailTap.keyId) {
       const tipWorld = this.desk.keyTopWorld(this.tailTap.keyId, this.tailTap.tip);
@@ -2921,8 +2947,15 @@ export class KuroCatEngine3D {
       const pawTrack = arm.s < 0 ? this.paws.L : this.paws.R;
       this.attachLocal(arm.shoulderLocal, arm.shoulder);
       arm.hand.copy(pawTrack.pos);
+      const five = petPose.highFive?.side === (arm.s < 0 ? 'left' : 'right') ? fiveAmount : 0;
+      if (five > 0) {
+        // Reach toward the viewer without affecting the keyboard or mouse tracking springs.
+        arm.hand.x = mix(arm.hand.x, this.homePos.x + arm.s * 0.48, five);
+        arm.hand.y = mix(arm.hand.y, 0.90, five);
+        arm.hand.z = mix(arm.hand.z, this.homePos.z + 0.98, five);
+      }
 
-      const tuck = pawTrack.tuckWeight;
+      const tuck = pawTrack.tuckWeight * (1 - five);
       const onMouse = arm.s < 0 && mousing;
       const reach = arm.shoulder.distanceTo(arm.hand);
       const lift = mix(0.24, 0.06, clamp((reach - 0.85) / 0.85, 0, 1)) * (1 - tuck * 0.65);
@@ -2960,6 +2993,7 @@ export class KuroCatEngine3D {
       const pawScale = mix(1.0, 0.94, tuck);
       arm.paw.position.set(arm.hand.x, arm.hand.y - 0.010, arm.hand.z + 0.014);
       arm.paw.scale.set(0.126 * pawScale, 0.080 * pawScale, 0.118 * pawScale);
+      arm.paw.rotation.x = five * 0.9;
       arm.paw.rotation.y = Math.atan2(arm.hand.x - arm.c2.x, Math.max(0.1, arm.hand.z - arm.c2.z)) * 0.42;
     }
 

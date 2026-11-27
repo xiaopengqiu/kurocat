@@ -14,6 +14,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const SERVER_NAME: &str = "kurocat";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentErrorKind {
+    Tool,
+    Task,
+}
+
 /// Real-time AI Coding Companion / pet interaction payload broadcast to both the desktop
 /// pet window (`kuro-agent-event`) and the OBS Browser Source SSE stream (`agentEvent`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -31,6 +38,10 @@ pub struct AgentCompanionEvent {
     pub source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_is_default: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_kind: Option<AgentErrorKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -212,6 +223,8 @@ pub fn parse_hook_payload(
                 status: None,
                 action: Some(action.to_string()),
                 source: Some(source),
+                text_is_default: None,
+                error_kind: None,
                 text: override_text,
                 tool: None,
                 auto_type: Some(false),
@@ -224,12 +237,19 @@ pub fn parse_hook_payload(
 
     if let Some(st_raw) = event_hint.or_else(|| raw.get("status").and_then(|v| v.as_str())) {
         if let Some(status) = normalize_status(st_raw) {
+            let error_kind = (status == "error").then(|| {
+                if raw.get("errorKind").and_then(Value::as_str) == Some("tool") {
+                    AgentErrorKind::Tool
+                } else {
+                    AgentErrorKind::Task
+                }
+            });
             let (default_text, default_auto_type, default_ttl, default_sound) = match status {
                 "working" => (Some("写代码中…".to_string()), true, 45_000, false),
                 "thinking" => (Some("思考中…".to_string()), false, 35_000, false),
                 "waiting" => (Some("等你确认操作".to_string()), false, 90_000, true),
                 "done" => (Some("任务完成！".to_string()), false, 6_500, true),
-                "error" => (Some("任务出错了".to_string()), false, 8_500, true),
+                "error" => (None, false, 8_500, error_kind != Some(AgentErrorKind::Tool)),
                 _ => (None, false, 1_500, false),
             };
             return Some(AgentCompanionEvent {
@@ -237,6 +257,8 @@ pub fn parse_hook_payload(
                 status: Some(status.to_string()),
                 action: None,
                 source: Some(source),
+                text_is_default: (override_text.is_none() && default_text.is_some()).then_some(true),
+                error_kind,
                 text: override_text.or(default_text),
                 tool: raw
                     .get("tool")
@@ -258,6 +280,8 @@ pub fn parse_hook_payload(
                 status: Some("done".to_string()),
                 action: None,
                 source: Some(source),
+                text_is_default: None,
+                error_kind: None,
                 text: override_text.or_else(|| Some("任务完成！".to_string())),
                 tool: None,
                 auto_type: Some(false),
@@ -285,6 +309,8 @@ pub fn parse_hook_payload(
                 status: None,
                 action: None,
                 source: Some(source),
+                text_is_default: None,
+                error_kind: None,
                 text: Some(txt),
                 tool: None,
                 auto_type: Some(false),
@@ -322,6 +348,8 @@ pub fn parse_hook_payload(
             status: Some("idle".to_string()),
             action: None,
             source: Some(source),
+            text_is_default: None,
+            error_kind: None,
             text: override_text.or_else(|| Some("已连接，待命中".to_string())),
             tool: None,
             auto_type: Some(false),
@@ -334,6 +362,8 @@ pub fn parse_hook_payload(
             status: Some("idle".to_string()),
             action: None,
             source: Some(source),
+            text_is_default: None,
+            error_kind: None,
             text: None,
             tool: None,
             auto_type: Some(false),
@@ -346,6 +376,8 @@ pub fn parse_hook_payload(
             status: Some("working".to_string()),
             action: None,
             source: Some(source),
+            text_is_default: override_text.is_none().then_some(true),
+            error_kind: None,
             text: override_text.or_else(|| Some("思考写代码中…".to_string())),
             tool: None,
             auto_type: Some(explicit_auto_type.unwrap_or(true)),
@@ -361,10 +393,12 @@ pub fn parse_hook_payload(
                     status: Some("error".to_string()),
                     action: None,
                     source: Some(source),
-                    text: override_text.or_else(|| Some("工具执行出错".to_string())),
+                    text_is_default: None,
+                    error_kind: Some(AgentErrorKind::Tool),
+                    text: override_text,
                     tool: clean_short_text(tool_name, 36),
                     auto_type: Some(false),
-                    sound: Some(explicit_sound.unwrap_or(true)),
+                    sound: Some(explicit_sound.unwrap_or(false)),
                     ttl_ms: Some(explicit_ttl.unwrap_or(8_000)),
                     ts,
                 });
@@ -375,6 +409,8 @@ pub fn parse_hook_payload(
                 status: Some("working".to_string()),
                 action: None,
                 source: Some(source),
+                text_is_default: override_text.is_none().then_some(true),
+                error_kind: None,
                 text: override_text.or_else(|| Some(label.to_string())),
                 tool: clean_short_text(tool_name, 36),
                 auto_type: Some(explicit_auto_type.unwrap_or(auto_type)),
@@ -388,10 +424,12 @@ pub fn parse_hook_payload(
             status: Some("error".to_string()),
             action: None,
             source: Some(source),
-            text: override_text.or_else(|| Some("工具执行失败".to_string())),
+            text_is_default: None,
+            error_kind: Some(AgentErrorKind::Tool),
+            text: override_text,
             tool: clean_short_text(tool_name, 36),
             auto_type: Some(false),
-            sound: Some(explicit_sound.unwrap_or(true)),
+            sound: Some(explicit_sound.unwrap_or(false)),
             ttl_ms: Some(explicit_ttl.unwrap_or(8_500)),
             ts,
         }),
@@ -400,6 +438,8 @@ pub fn parse_hook_payload(
             status: Some("waiting".to_string()),
             action: None,
             source: Some(source),
+            text_is_default: None,
+            error_kind: None,
             text: override_text.or_else(|| Some("等你确认操作".to_string())),
             tool: clean_short_text(tool_name, 36),
             auto_type: Some(false),
@@ -414,6 +454,8 @@ pub fn parse_hook_payload(
                     status: Some("idle".to_string()),
                     action: None,
                     source: Some(source),
+                    text_is_default: None,
+                    error_kind: None,
                     text: None,
                     tool: None,
                     auto_type: Some(false),
@@ -428,7 +470,9 @@ pub fn parse_hook_payload(
                     status: Some("error".to_string()),
                     action: None,
                     source: Some(source),
-                    text: override_text.or_else(|| Some("任务出错了".to_string())),
+                    text_is_default: None,
+                    error_kind: Some(AgentErrorKind::Task),
+                    text: override_text,
                     tool: None,
                     auto_type: Some(false),
                     sound: Some(explicit_sound.unwrap_or(true)),
@@ -441,6 +485,8 @@ pub fn parse_hook_payload(
                 status: Some("done".to_string()),
                 action: None,
                 source: Some(source),
+                text_is_default: None,
+                error_kind: None,
                 text: override_text.or_else(|| Some("任务完成！".to_string())),
                 tool: None,
                 auto_type: Some(false),
@@ -754,12 +800,13 @@ fn tool_definitions() -> Value {
                     "status": {
                         "type": "string",
                         "enum": ["working", "thinking", "waiting", "done", "error", "idle"],
-                        "description": "working = cat auto-types code; thinking = curious head tilt; waiting = awaits user approval; done = happy completion alert; error = grumpy alert; idle = clear status"
+                        "description": "working = cat auto-types code; thinking = curious head tilt; waiting = awaits user approval; done = happy completion alert; error = reports a tool or task failure; idle = clear status"
                     },
+                    "errorKind": { "type": "string", "enum": ["tool", "task"], "description": "Applies to error status. Tool failures get a quiet reaction; task failures get a grumpy alert. Default: task." },
                     "text": { "type": "string", "description": "Short status text shown in the floating pill bubble (<=72 chars), e.g. '正在修复登录 Bug…' or '构建通过！'" },
                     "source": { "type": "string", "description": "Optional agent badge name, e.g. '豆包工作版', 'WorkBuddy', 'DeepSeek', 'Codex', '千问', 'Antigravity', 'Claude'" },
                     "autoType": { "type": "boolean", "description": "Whether the cat should virtually type on its keyboard (defaults to true for 'working')." },
-                    "sound": { "type": "boolean", "description": "Play a gentle chime if sound is enabled (defaults to true for done/waiting/error)." },
+                    "sound": { "type": "boolean", "description": "Play a gentle chime if sound is enabled (defaults to true for done, waiting and task failures)." },
                     "ttlMs": { "type": "integer", "minimum": 1000, "maximum": 300000, "description": "Auto-clear timeout in milliseconds." }
                 }
             }
@@ -1534,6 +1581,9 @@ mod tests {
         });
         let ev3 = parse_hook_payload(&post_err, None, None, None).unwrap();
         assert_eq!(ev3.status.as_deref(), Some("error"));
+        assert_eq!(ev3.error_kind, Some(AgentErrorKind::Tool));
+        assert_eq!(ev3.text, None);
+        assert_eq!(ev3.sound, Some(false));
 
         let stop_ok = json!({
             "hookEventName": "Stop",
@@ -1571,6 +1621,42 @@ mod tests {
         let ev2 = parse_hook_payload(&codex_notify, None, None, None).unwrap();
         assert_eq!(ev2.source.as_deref(), Some("Codex"));
         assert_eq!(ev2.status.as_deref(), Some("done"));
+    }
+
+    #[test]
+    fn identifies_failure_scope_and_preserves_custom_captions() {
+        let tool = parse_hook_payload(&json!({
+            "hook_event_name": "PostToolUseFailure", "text": "构建失败，等待日志", "sound": true
+        }), Some("Codex"), None, None).unwrap();
+        assert_eq!(tool.error_kind, Some(AgentErrorKind::Tool));
+        assert_eq!(tool.text.as_deref(), Some("构建失败，等待日志"));
+        assert_eq!(tool.sound, Some(true));
+
+        let task = parse_hook_payload(&json!({
+            "hook_event_name": "Stop", "termination_reason": "ERROR"
+        }), Some("Codex"), None, None).unwrap();
+        assert_eq!(task.error_kind, Some(AgentErrorKind::Task));
+        assert_eq!(task.text, None);
+        assert_eq!(serde_json::to_value(task).unwrap()["errorKind"], "task");
+
+        let direct = parse_hook_payload(&json!({"status": "error", "errorKind": "tool"}),
+            None, None, None).unwrap();
+        assert_eq!(direct.error_kind, Some(AgentErrorKind::Tool));
+        assert_eq!(direct.sound, Some(false));
+    }
+
+    #[test]
+    fn labels_automatic_working_text_without_marking_user_copy() {
+        let default = parse_hook_payload(&json!({"hook_event_name": "PreToolUse", "tool_name": "Bash"}),
+            Some("Codex"), None, None).unwrap();
+        assert_eq!(default.status.as_deref(), Some("working"));
+        assert_eq!(default.text_is_default, Some(true));
+        assert!(default.text.is_some());
+
+        let custom = parse_hook_payload(&json!({"status": "working", "text": "重跑测试"}),
+            Some("Codex"), None, None).unwrap();
+        assert_eq!(custom.text_is_default, None);
+        assert_eq!(custom.text.as_deref(), Some("重跑测试"));
     }
 
     #[test]

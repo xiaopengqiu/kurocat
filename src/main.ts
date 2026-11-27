@@ -1,6 +1,6 @@
 import './style.css';
 import { bindIdleControls, syncIdleControls } from './idlePreferences';
-import { idleDelaySeconds, isHeadTap } from './petInteraction';
+import { idleDelaySeconds, isPetTap, type PawSide } from './petInteraction';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -119,7 +119,7 @@ function saveDismissedVersion(version: string): void {
   }
 }
 
-let appVersion = '5.1.4';
+let appVersion = '5.1.5';
 let latestUpdateInfo: UpdateInfo | null = null;
 let updateBusy = false;
 let dismissedVersion: string | null = loadDismissedVersion();
@@ -1207,43 +1207,55 @@ async function bootstrap(): Promise<void> {
     if (preset) applyTailPreset(preset);
   });
 
-  let headPress: {
+  let petPress: {
     at: number;
     screenX: number;
     screenY: number;
     moved: boolean;
     released: boolean;
-    direction: number;
+    gesture: { kind: 'pat'; direction: number } | { kind: 'high-five'; side: PawSide };
     target: KuroCatEngine | KuroCatEngine3D;
   } | null = null;
-  const releaseHeadPress = () => {
-    const press = headPress;
+  const releasePetPress = () => {
+    const press = petPress;
     if (!press || press.released) return;
     press.released = true;
     const duration = performance.now() - press.at;
     // Finish after any native window-moved event from the drag has arrived.
     window.setTimeout(() => {
-      if (headPress !== press) return;
-      headPress = null;
+      if (petPress !== press) return;
+      petPress = null;
       const target = active3d && engine3d ? engine3d : engine;
       if (press.target !== target || privacyActive || tailPickerOpen) return;
       if (settings.clickThroughLocked && !altOverride) return;
-      if (isHeadTap(duration, press.moved)) target.patHead(press.direction);
+      if (!isPetTap(duration, press.moved)) return;
+      if (press.gesture.kind === 'pat') target.patHead(press.gesture.direction);
+      else target.highFive(press.gesture.side);
     }, 50);
   };
-  const trackHeadPress = (ev: MouseEvent) => {
-    if (headPress && Math.hypot(ev.screenX - headPress.screenX, ev.screenY - headPress.screenY) > 5) {
-      headPress.moved = true;
+  const trackPetPress = (ev: MouseEvent) => {
+    const overCanvas = ev.target === canvas || ev.target === canvas3d;
+    const target = active3d && engine3d ? engine3d : engine;
+    const pawHover = overCanvas && !petPress && !tailPickerOpen && !privacyActive &&
+      (!settings.clickThroughLocked || altOverride || ev.altKey) && target.pawTapSide(ev.clientX, ev.clientY) !== null;
+    canvas.classList.toggle('paw-hover', pawHover && ev.target === canvas);
+    canvas3d.classList.toggle('paw-hover', pawHover && ev.target === canvas3d);
+    if (petPress && Math.hypot(ev.screenX - petPress.screenX, ev.screenY - petPress.screenY) > 5) {
+      petPress.moved = true;
     }
   };
-  window.addEventListener('mousemove', trackHeadPress);
+  window.addEventListener('mousemove', trackPetPress);
+  document.addEventListener('mouseleave', () => {
+    canvas.classList.remove('paw-hover');
+    canvas3d.classList.remove('paw-hover');
+  });
   window.addEventListener('mouseup', (ev) => {
     if (ev.button !== 0) return;
-    trackHeadPress(ev);
-    releaseHeadPress();
+    trackPetPress(ev);
+    releasePetPress();
   });
   await getCurrentWindow().onMoved(() => {
-    if (headPress) headPress.moved = true;
+    if (petPress) petPress.moved = true;
   });
 
   await listen<InputEvent>('kuro-input', (ev) => {
@@ -1279,7 +1291,7 @@ async function bootstrap(): Promise<void> {
         else engine.onMouseDown(p.button);
         break;
       case 'mouseUp':
-        if (p.button === 'left') releaseHeadPress();
+        if (p.button === 'left') releasePetPress();
         if (active3d && engine3d) engine3d.onMouseUp(p.button);
         else engine.onMouseUp(p.button);
         break;
@@ -1332,6 +1344,10 @@ async function bootstrap(): Promise<void> {
     if (active3d && engine3d) engine3d.onWindowCursor(c.relX, c.relY, c.overCat);
     else engine.onWindowCursor(c.relX, c.relY, c.overCat);
     const interactive = !settings.clickThroughLocked || altOverride;
+    if (!interactive || !c.insideWindow) {
+      canvas.classList.remove('paw-hover');
+      canvas3d.classList.remove('paw-hover');
+    }
     const petHover = c.overCat && interactive;
     if (petHover !== lastPetHover) {
       lastPetHover = petHover;
@@ -1369,10 +1385,15 @@ async function bootstrap(): Promise<void> {
       if (settings.clickThroughLocked && !altOverride && !e.altKey) return;
       const target = active3d && engine3d ? engine3d : engine;
       const direction = tailPickerOpen || privacyActive ? null : target.headPatDirection(e.clientX, e.clientY);
-      headPress = direction === null ? null : {
+      const side = direction === null && !tailPickerOpen && !privacyActive
+        ? target.pawTapSide(e.clientX, e.clientY)
+        : null;
+      const gesture = direction !== null ? { kind: 'pat' as const, direction }
+        : side !== null ? { kind: 'high-five' as const, side } : null;
+      petPress = gesture ? {
         at: performance.now(), screenX: e.screenX, screenY: e.screenY,
-        moved: false, released: false, direction, target,
-      };
+        moved: false, released: false, gesture, target,
+      } : null;
       canvas.classList.add('pet-dragging');
       canvas3d.classList.add('pet-dragging');
       void invoke('set_dragging', { dragging: true });

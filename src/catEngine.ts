@@ -8,7 +8,7 @@ import {
   resolveKeyByVk,
 } from './keyboardLayout';
 import { catAudio } from './audio';
-import { PetGesture, SleepTransition } from './petInteraction';
+import { bendTail, gentleWakeAmount, idleTailSwing, isWakeBurst, pawSideAt, PetGesture, SleepTransition, type PawSide, type TailSwing } from './petInteraction';
 import { resolveCustomSkin, type CatSkinConfig, type ResolvedSkin } from './catSkins';
 import { DaFeiYuRenderer, type DaFeiYuLayout } from './dafeiyuRenderer';
 
@@ -434,14 +434,36 @@ export class KuroCatEngine {
     );
   }
 
-  public headPatDirection(clientX: number, clientY: number): number | null {
-    if (this.catBreed === 'dafeiyu') return null;
+  private clientPoint(clientX: number, clientY: number): Vec2 | null {
     const rect = this.canvas.getBoundingClientRect();
     const { offsetX, offsetY, uniformScale } = this.getViewportTransform();
     if (rect.width < 2 || rect.height < 2 || uniformScale <= 0.001) return null;
+    return {
+      x: ((clientX - rect.left) * this.canvas.width / rect.width - offsetX) / uniformScale,
+      y: ((clientY - rect.top) * this.canvas.height / rect.height - offsetY) / uniformScale,
+    };
+  }
+
+  private pawCenter(paw: PawState, breath: number): Vec2 {
+    if (paw.curlWeight > 0.5) return this.getLiveCurledPawPos(paw, breath);
+    if (paw.idleWeight <= 0.5) return paw.pos;
+    const base = this.spinePoint(1, breath);
+    return { x: base.x + (paw.side === 'left' ? -24 : 24), y: base.y - 4 };
+  }
+
+  public pawTapSide(clientX: number, clientY: number): PawSide | null {
+    if (this.catBreed === 'dafeiyu' || this.privacyMode) return null;
+    const cursor = this.clientPoint(clientX, clientY);
+    return cursor ? pawSideAt(cursor, this.pawCenter(this.leftPaw, 0), this.pawCenter(this.rightPaw, 0), 13) : null;
+  }
+
+  public headPatDirection(clientX: number, clientY: number): number | null {
+    if (this.catBreed === 'dafeiyu') return null;
+    const cursor = this.clientPoint(clientX, clientY);
+    if (!cursor) return null;
     const head = this.spinePoint(0.24, 0);
-    const dx = ((clientX - rect.left) * this.canvas.width / rect.width - offsetX) / uniformScale - head.x;
-    const dy = ((clientY - rect.top) * this.canvas.height / rect.height - offsetY) / uniformScale - head.y;
+    const dx = cursor.x - head.x;
+    const dy = cursor.y - head.y;
     if (Math.hypot(dx / 68, dy / (this.catHeight * 0.25)) > 1) return null;
     return Math.sign(dx || 1) * Math.max(0.35, Math.abs(dx / 68));
   }
@@ -820,7 +842,8 @@ export class KuroCatEngine {
   private idleDelayMs: number | undefined;
   private idleAnimationsEnabled = true;
   private idleStretch = 0;
-  private petTail = 0;
+  private petTail: TailSwing | null = null;
+  private highFivePose: { side: PawSide; amount: number } | null = null;
   private sleepTail = 0;
   private squintAmount = 0;
   private purrAmount = 0;
@@ -953,11 +976,18 @@ export class KuroCatEngine {
   public patHead(direction: number): void {
     if (this.privacyMode || this.catBreed === 'dafeiyu') return;
     const now = performance.now();
-    this.wakeCat(now, 'gentle');
-    this.wakeAt = -10000;
+    const sleepy = this.asleep || this.sleepAmount > 0.35;
+    this.wakeCat(now);
     this.isCross = false;
     this.annoy = 0;
-    this.petGesture.tap(now, direction);
+    this.petGesture.tap(now, direction, sleepy ? 420 : 0);
+  }
+
+  public highFive(side: PawSide): void {
+    if (this.privacyMode || this.catBreed === 'dafeiyu') return;
+    const now = performance.now();
+    this.wakeCat(now);
+    this.petGesture.highFive(now, side);
   }
 
   private readonly renderFrame = (now: number): void => {
@@ -1212,7 +1242,11 @@ export class KuroCatEngine {
     const now = performance.now();
     const spec = resolveKeyByVk(vk, this.keyboardLayout);
     if (!spec) return;
-    this.wakeCat(now, repeat ? 'gentle' : 'abrupt');
+    if (!repeat) {
+      this.recentKeyTimes.push(now);
+      if (this.recentKeyTimes.length > 26) this.recentKeyTimes.shift();
+    }
+    this.wakeCat(now, !repeat && isWakeBurst(this.recentKeyTimes, 270) ? 'abrupt' : 'gentle');
 
     const anim = this.keyAnims.get(spec.id);
     if (anim) {
@@ -1233,8 +1267,6 @@ export class KuroCatEngine {
 
     const prevAnyKeyAt = this.lastAnyKeyAt;
     this.lastAnyKeyAt = now;
-    this.recentKeyTimes.push(now);
-    if (this.recentKeyTimes.length > 26) this.recentKeyTimes.shift();
 
     // Key mashing (4+ keys within 180ms) irritates the cat slightly!
     let burstCount = 0;
@@ -1462,7 +1494,7 @@ export class KuroCatEngine {
       return;
     }
 
-    this.wakeCat(now, 'abrupt');
+    this.wakeCat(now);
     // On desktop, onGlobalMouseMove carries true full-screen 0..1 coords; on embedded web, window pointermove feeds onPointerSpeedSample directly
     if (!this.embedded) {
       this.recordPointerSpeed(nx, ny, now);
@@ -1532,8 +1564,8 @@ export class KuroCatEngine {
 
   public onMouseDown(button: string): void {
     const now = performance.now();
-    this.wakeCat(now, 'abrupt');
-    this.squashSpring.kick(1.2);
+    this.wakeCat(now);
+    this.squashSpring.kick(this.sleepAmount > 0.35 ? 0.2 : 1.2);
     if (button === 'left') {
       this.mouseLeftDown = true;
       this.mouseDownAt.left = now;
@@ -1576,7 +1608,7 @@ export class KuroCatEngine {
 
   public onMouseWheel(): void {
     const now = performance.now();
-    this.wakeCat(now, 'abrupt');
+    this.wakeCat(now);
     this.mouseScrollFlash = 1;
     this.lastMouseMoveAt = now;
     this.lastMouseClickAt = now;
@@ -1670,13 +1702,12 @@ export class KuroCatEngine {
           }
 
           // Only unlock petting energy & purring after intentional back-and-forth / circular strokes (Fixes #13)
-          if (this.petStrokeCount >= REQUIRED_STROKES) {
+          if (this.petStrokeCount >= REQUIRED_STROKES && !this.asleep && this.sleepAmount < 0.35) {
             if (this.idleDelayMs !== undefined && !this.privacyMode && this.catBreed !== 'dafeiyu') {
               this.petGesture.stroke(now, dx / 10);
             }
             this.petEnergy = Math.min(1, this.petEnergy + dist * 0.015);
-            this.wakeCat(now, 'gentle');
-            this.wakeAt = -10000;
+            this.wakeCat(now);
             this.isCross = false;
             this.annoy = 0;
           }
@@ -1894,7 +1925,10 @@ export class KuroCatEngine {
       this.nextZAt = now + 900;
     }
     const wantSleep = isCatMode && this.asleep && !this.privacyMode ? 1 : 0;
-    this.sleepAmount += (wantSleep - this.sleepAmount) * (1 - Math.exp(-(wantSleep ? 1.5 : 6.5) * dt));
+    const waking = !this.asleep && !this.isCross && now - this.wakeAt < 480;
+    const wakeMotion = waking ? gentleWakeAmount(now - this.wakeAt) : 0;
+    const sleepRate = wantSleep ? 1.5 : waking ? 3.6 : 6.5;
+    this.sleepAmount += (wantSleep - this.sleepAmount) * (1 - Math.exp(-sleepRate * dt));
     if (this.sleepAmount < 0.002 && !wantSleep) this.sleepAmount = 0;
 
     // Fast pointer speed over last 220ms triggers Curious (laser-pointer big round eyes!)
@@ -1907,6 +1941,7 @@ export class KuroCatEngine {
     const canTriggerCurious =
       isCatMode &&
       !this.asleep &&
+      !waking &&
       !this.privacyMode &&
       !this.isCross &&
       now - this.lastAnyKeyAt > 900;
@@ -1971,7 +2006,7 @@ export class KuroCatEngine {
         ear: 460,
         slowBlink: 1450,
         look: 2100,
-        tail: 1100,
+        tail: 1500,
       };
       this.idleAct = {
         kind,
@@ -1993,11 +2028,12 @@ export class KuroCatEngine {
     if (this.privacyMode || this.asleep) this.petGesture.clear();
     const petPose = this.petGesture.pose(now);
     this.petTail = petPose.tail;
+    this.highFivePose = petPose.highFive;
 
     // 2) Staggered 240Hz spring posture (body & hunch follow a beat behind head & eyes!)
     const targetHunch = isTypingRecently
       ? 0.45 + this.typingEnergy * 0.55
-      : curiousClamped * 0.28 + this.idleStretch * 0.7;
+      : curiousClamped * 0.28 + this.idleStretch * 0.7 + (this.highFivePose?.amount ?? 0) * 0.28;
     this.typingHunch = Math.max(0, Math.min(1.2, this.hunchSpring.step(targetHunch, dt)));
     this.squashSpring.step(this.sleepAmount * 0.35 - curiousClamped * 0.25, dt);
 
@@ -2045,11 +2081,6 @@ export class KuroCatEngine {
     const gx = Math.tanh(rawDx * 2.15);
     const gy = Math.tanh(rawDy * 2.05);
 
-    const wakeElapsed = (now - this.wakeAt) / 1000;
-    const wakeShake =
-      wakeElapsed >= 0 && wakeElapsed < 0.55
-        ? Math.sin(wakeElapsed * 36) * 0.18 * (1 - wakeElapsed / 0.55)
-        : 0;
     const fidgetTilt = act && act.kind === 'tilt' ? act.side * 0.19 * actEnv : 0;
     // Continuous smooth head cock when curious (never snaps left/right across dx=0!)
     const curiousCock = curiousClamped * 0.16 * gx;
@@ -2061,7 +2092,7 @@ export class KuroCatEngine {
       fidgetTilt +
       curiousCock +
       sleepTilt + petPose.lean * 0.23 + this.idleStretch * 0.09;
-    this.headTilt = this.headTiltSpring.step(desiredHeadTilt, dt) + wakeShake;
+    this.headTilt = this.headTiltSpring.step(desiredHeadTilt + wakeMotion * 0.06, dt);
 
     this.petEnergy = Math.max(0, this.petEnergy - dt * (this.cursorOverCat ? 0.22 : 1.15));
     this.lastDt = dt;
@@ -2081,7 +2112,7 @@ export class KuroCatEngine {
         0.16 * curiousClamped -
         0.18 * this.squintAmount -
         0.58 * this.crossAmount -
-        0.12 * this.sleepAmount + petPose.ear * 0.48
+        0.12 * this.sleepAmount + petPose.ear * 0.48 + wakeMotion * 0.32
       : 0;
     this.earPerkSpring.step(earTarget, dt);
 
@@ -2205,7 +2236,7 @@ export class KuroCatEngine {
         this.idleAct !== null ||
         this.fxParticles.some((fx) => fx.kind !== 'z') ||
         (this.sleepAmount > 0.02 && this.sleepAmount < 0.98) ||
-        (wakeElapsed >= 0 && wakeElapsed < 0.65) ||
+        waking || this.highFivePose !== null ||
         Math.abs(this.deskHopY) > 0.15 ||
         Math.abs(this.eyeXSpring.v) > 0.02 ||
         Math.abs(this.eyeYSpring.v) > 0.02 ||
@@ -2581,8 +2612,7 @@ export class KuroCatEngine {
     //  4) subtle curious tip twitch / idle fidget flick!
     const now = performance.now();
     const act = this.idleAct;
-    const actU = act ? Math.max(0, Math.min(1, (now - act.t0) / act.dur)) : 0;
-    const tailFlick = (act?.kind === 'tail' ? Math.sin(actU * Math.PI * 2) * 7.5 : 0) + this.petTail * 24;
+    const swing = this.petTail ?? (act?.kind === 'tail' ? idleTailSwing(now - act.t0, act.dur, act.side) : null);
     const curiousTwitch =
       this.curiousAmount > 0.05
         ? Math.sin(this.elapsed * 14.5) * 4.2 * Math.min(1, this.curiousAmount)
@@ -2597,8 +2627,8 @@ export class KuroCatEngine {
     let restCp1Y = startY + 4 + gentleDrift * 0.25;
     let restCp2X = startX + 38;
     let restCp2Y = startY - 34 + gentleDrift * 0.45;
-    let restEndX = startX + 70 + gentleDrift * 0.35 + tailFlick * 0.4;
-    let restEndY = startY - 35 + gentleDrift + tailFlick + curiousTwitch;
+    let restEndX = startX + 70 + gentleDrift * 0.35;
+    let restEndY = startY - 35 + gentleDrift + curiousTwitch;
 
     // Sleepy cozy curl: tucks low and forward beside the cat's hip
     if (this.sleepAmount > 0.01) {
@@ -2619,6 +2649,20 @@ export class KuroCatEngine {
 
     restEndX += this.sleepTail * 6;
     restEndY += this.sleepTail * 8;
+
+    if (swing) {
+      const root = { x: startX, y: startY };
+      const first = { x: restCp1X, y: restCp1Y };
+      const second = { x: restCp2X, y: restCp2Y };
+      const tip = { x: restEndX, y: restEndY };
+      bendTail([root, first, second, tip], swing);
+      restCp1X = first.x;
+      restCp1Y = first.y;
+      restCp2X = second.x;
+      restCp2Y = second.y;
+      restEndX = tip.x;
+      restEndY = tip.y;
+    }
 
     // Grumpy 3-beat desk-thump pose when cross (lifts up smoothly, slams down onto desk!)
     const r = Math.max(0, Math.min(1, this.catTail.reach));
@@ -4307,6 +4351,9 @@ export class KuroCatEngine {
   }
 
   private drawPaw(ctx: CanvasRenderingContext2D, paw: PawState, breath: number): void {
+    const five = this.highFivePose?.side === paw.side ? this.highFivePose.amount : 0;
+    const gestureAlpha = Math.min(1, five * 5);
+    const baseAlpha = 1 - gestureAlpha;
     // 1) Seated idle vertical front legs (EXACT 4 clean lines of ORIG 0.3s!) OR planted diagonal supporting leg (ORIG 2.2s!)
     if (paw.idleWeight > 0.05) {
       ctx.save();
@@ -4314,10 +4361,10 @@ export class KuroCatEngine {
         const shoulder = this.getLiveShoulder(paw, breath);
         const base = this.spinePoint(1, breath);
         const side = paw.side === 'left' ? -1 : 1;
-        ctx.globalAlpha = paw.idleWeight * this.idleStretch;
+        ctx.globalAlpha = paw.idleWeight * this.idleStretch * baseAlpha;
         this.drawPlumpCatArm(ctx, paw.side, shoulder.x, shoulder.y, base.x + side * 42, base.y + 16, 0, true);
       }
-      ctx.globalAlpha = paw.idleWeight * (1 - this.idleStretch);
+      ctx.globalAlpha = paw.idleWeight * (1 - this.idleStretch) * baseAlpha;
 
       if (paw.side === 'right' && this.leftPaw.mode === 'mouse') {
         const sh = this.getLiveShoulder(paw, breath);
@@ -4389,11 +4436,11 @@ export class KuroCatEngine {
 
     // 2) Continuous bent articulated curled chest arm (8.3s / 10.6s / 23.2s / 26.2s!)
     if (paw.curlWeight > 0.05) {
-      this.drawBentCurledArm(ctx, paw, breath, paw.curlWeight);
+      this.drawBentCurledArm(ctx, paw, breath, paw.curlWeight * baseAlpha);
     }
 
     // 3) Plump velvety poking / mouse-holding cat arm!
-    const activeArmWeight = Math.max(0, 1 - paw.idleWeight - paw.curlWeight);
+    const activeArmWeight = Math.max(0, 1 - paw.idleWeight - paw.curlWeight) * baseAlpha;
     if (activeArmWeight > 0.05) {
       const sh = this.getLiveShoulder(paw, breath);
       const px = paw.pos.x;
@@ -4416,6 +4463,26 @@ export class KuroCatEngine {
 
       // Keep mouse-reaching arm pure velvet black in open air (ORIG 2.2s); show subtle separation lines when poking across black torso!
       this.drawPlumpCatArm(ctx, paw.side, sh.x, sh.y, px, py, paw.impactSquash, paw.mode !== 'mouse', false);
+      ctx.restore();
+    }
+    if (five > 0) {
+      const shoulder = this.getLiveShoulder(paw, breath);
+      const rest = this.pawCenter(paw, breath);
+      const side = paw.side === 'left' ? -1 : 1;
+      ctx.save();
+      ctx.globalAlpha = gestureAlpha;
+      const x = rest.x + side * 43 * five;
+      const y = rest.y - 57 * five;
+      this.drawPlumpCatArm(ctx, paw.side, shoulder.x, shoulder.y, x, y, 0, true);
+      ctx.globalAlpha = Math.max(0, five - 0.45) * 1.5;
+      ctx.fillStyle = this.customSkin?.blushColor || '#c68e91';
+      ctx.beginPath();
+      ctx.ellipse(x, y + 1.5, 5.4, 3.7, 0, 0, Math.PI * 2);
+      for (const dx of [-4.0, 0, 4.0]) {
+        ctx.moveTo(x + dx + 1.6, y - 4);
+        ctx.ellipse(x + dx, y - 4, 1.6, 1.9, 0, 0, Math.PI * 2);
+      }
+      ctx.fill();
       ctx.restore();
     }
   }
