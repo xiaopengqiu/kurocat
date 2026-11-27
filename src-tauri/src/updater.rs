@@ -9,6 +9,7 @@ const REPO_RELEASES_PAGE: &str = "https://github.com/xiaopengqiu/kurocat/release
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 static LATEST_UPDATE_CACHE: OnceLock<Mutex<Option<UpdateInfo>>> = OnceLock::new();
+static UPDATE_INSTALL: UpdateInstallState = UpdateInstallState(Mutex::new(None));
 
 pub fn get_cached_update_info() -> Option<UpdateInfo> {
     LATEST_UPDATE_CACHE
@@ -47,6 +48,49 @@ pub struct UpdateProgressEvent {
     pub stage: String,
     pub message: String,
     pub info: Option<UpdateInfo>,
+    pub percent: Option<u8>,
+}
+
+#[derive(Default)]
+struct UpdateInstallState(Mutex<Option<UpdateProgressEvent>>);
+
+impl UpdateInstallState {
+    fn begin(&self, event: UpdateProgressEvent, emit: impl FnOnce(&UpdateProgressEvent)) -> bool {
+        let mut active = self.0.lock().unwrap();
+        let started = active.is_none();
+        emit(active.get_or_insert(event));
+        started
+    }
+
+    fn publish(&self, event: UpdateProgressEvent, emit: impl FnOnce(&UpdateProgressEvent)) {
+        let mut active = self.0.lock().unwrap();
+        emit(active.insert(event));
+    }
+
+    fn publish_check(
+        &self,
+        event: UpdateProgressEvent,
+        emit: impl FnOnce(&UpdateProgressEvent),
+    ) -> bool {
+        let active = self.0.lock().unwrap();
+        emit(active.as_ref().unwrap_or(&event));
+        active.is_some()
+    }
+
+    fn finish(&self, error: Option<&str>, emit: impl FnOnce(&UpdateProgressEvent)) {
+        let mut active = self.0.lock().unwrap();
+        if let Some(error) = error {
+            if let Some(mut event) = active.take() {
+                event.stage = "error".to_string();
+                event.message = error.to_string();
+                event.percent = None;
+                emit(&event);
+            }
+        } else if active.as_ref().is_some_and(|event| event.stage != "installing") {
+            // Native installers exit the app, so keep their claim through the handoff.
+            *active = None;
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -698,15 +742,42 @@ pub fn check_latest_update() -> Result<UpdateInfo, String> {
     Ok(info)
 }
 
+fn emit_update_event(app: &AppHandle, event: &UpdateProgressEvent) {
+    let _ = app.emit("kuro-update-status", event);
+}
+
+pub fn emit_check_status(
+    app: &AppHandle,
+    stage: &str,
+    message: impl Into<String>,
+    info: Option<UpdateInfo>,
+) -> bool {
+    UPDATE_INSTALL.publish_check(
+        update_event(stage, message, info),
+        |event| emit_update_event(app, event),
+    )
+}
+
+fn update_event(stage: &str, message: impl Into<String>, info: Option<UpdateInfo>) -> UpdateProgressEvent {
+    UpdateProgressEvent {
+        stage: stage.to_string(),
+        message: message.into(),
+        info,
+        percent: None,
+    }
+}
+
 fn emit_progress(app: &AppHandle, stage: &str, message: impl Into<String>, info: Option<UpdateInfo>) {
-    let _ = app.emit(
-        "kuro-update-status",
-        UpdateProgressEvent {
-            stage: stage.to_string(),
-            message: message.into(),
-            info,
-        },
+    UPDATE_INSTALL.publish(
+        update_event(stage, message, info),
+        |event| emit_update_event(app, event),
     );
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn download_percent(bytes: u64, total: Option<u64>) -> Option<u8> {
+    let total = total.filter(|&size| size > 0)?;
+    Some((u128::from(bytes) * 100 / u128::from(total)).min(100) as u8)
 }
 
 pub fn open_url_in_browser(url: &str) {
@@ -931,7 +1002,8 @@ fn find_current_macos_app_bundle() -> Option<PathBuf> {
 
 #[cfg(target_os = "macos")]
 fn install_macos_update(app: &AppHandle, info: &UpdateInfo) -> Result<(), String> {
-    use std::process::Command;
+    use std::process::{Command, Stdio};
+    use std::time::Duration;
 
     let url = info
         .download_url
@@ -944,18 +1016,12 @@ fn install_macos_update(app: &AppHandle, info: &UpdateInfo) -> Result<(), String
 
     if !asset_name.to_ascii_lowercase().ends_with(".tar.gz") {
         open_url_in_browser(url);
+        emit_progress(app, "available", "", Some(info.clone()));
         return Ok(());
     }
 
     let app_bundle = find_current_macos_app_bundle()
         .unwrap_or_else(|| PathBuf::from("/Applications/KuroCat.app"));
-
-    emit_progress(
-        app,
-        "downloading",
-        format!("正在下载 macOS v{}...", info.latest_version),
-        Some(info.clone()),
-    );
 
     let temp_dir = std::env::temp_dir().join(format!("kurocat-update-{}", info.latest_version));
     let _ = std::fs::remove_dir_all(&temp_dir);
@@ -964,9 +1030,23 @@ fn install_macos_update(app: &AppHandle, info: &UpdateInfo) -> Result<(), String
 
     let expected_sha = info.asset_sha256.as_deref()
         .ok_or_else(|| "GitHub Release 缺少 macOS 更新包的 SHA-256".to_string())?;
+    let report = |percent| {
+        let mut event = update_event(
+            "downloading",
+            format!("正在下载 v{}…", info.latest_version),
+            Some(info.clone()),
+        );
+        event.percent = percent;
+        UPDATE_INSTALL.publish(event, |event| emit_update_event(app, event));
+    };
     let mut verified = false;
     for download_url in [info.download_api_url.as_deref(), Some(url)].into_iter().flatten() {
-        let status = Command::new("/usr/bin/curl")
+        // Clear a previous attempt before sampling bytes from the new curl process.
+        std::fs::File::create(&archive_path).map_err(|e| format!("准备下载文件失败: {}", e))?;
+        let mut last_percent = download_percent(0, info.asset_size);
+        report(last_percent);
+
+        let mut curl = Command::new("/usr/bin/curl")
             .args([
                 "-fsSL",
                 "--proto", "=https", "--proto-redir", "=https",
@@ -978,9 +1058,30 @@ fn install_macos_update(app: &AppHandle, info: &UpdateInfo) -> Result<(), String
             ])
             .arg(&archive_path)
             .arg(download_url)
-            .output()
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
             .map_err(|e| format!("下载失败: {}", e))?;
-        if !status.status.success() {
+        let status = loop {
+            match curl.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) => {}
+                Err(err) => {
+                    let _ = curl.kill();
+                    let _ = curl.wait();
+                    return Err(format!("读取下载状态失败: {}", err));
+                }
+            }
+            if let Ok(metadata) = std::fs::metadata(&archive_path) {
+                let percent = download_percent(metadata.len(), info.asset_size);
+                if percent != last_percent {
+                    report(percent);
+                    last_percent = percent;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        };
+        if !status.success() {
             continue;
         }
         emit_progress(app, "verifying", "正在校验安装包完整性...", Some(info.clone()));
@@ -1093,8 +1194,9 @@ fn install_macos_update(app: &AppHandle, info: &UpdateInfo) -> Result<(), String
 }
 
 pub fn perform_update_install(app: &AppHandle, info: UpdateInfo) -> Result<(), String> {
+    let emit = |event: &UpdateProgressEvent| emit_update_event(app, event);
     if !info.has_update {
-        emit_progress(
+        emit_check_status(
             app,
             "up_to_date",
             format!("已是最新版本 v{}", info.current_version),
@@ -1103,14 +1205,28 @@ pub fn perform_update_install(app: &AppHandle, info: UpdateInfo) -> Result<(), S
         return Ok(());
     }
 
+    let starting = update_event(
+        "downloading",
+        format!("正在准备更新 v{}…", info.latest_version),
+        Some(info.clone()),
+    );
+    if !UPDATE_INSTALL.begin(starting, emit) {
+        return Ok(());
+    }
+    let result = install_update_for_platform(app, &info);
+    UPDATE_INSTALL.finish(result.as_ref().err().map(String::as_str), emit);
+    result
+}
+
+fn install_update_for_platform(app: &AppHandle, info: &UpdateInfo) -> Result<(), String> {
     #[cfg(windows)]
     {
-        return install_windows_update(app, &info);
+        install_windows_update(app, info)
     }
 
     #[cfg(target_os = "macos")]
     {
-        return install_macos_update(app, &info);
+        install_macos_update(app, info)
     }
 
     #[cfg(all(not(windows), not(target_os = "macos")))]
@@ -1121,7 +1237,7 @@ pub fn perform_update_install(app: &AppHandle, info: UpdateInfo) -> Result<(), S
             app,
             "up_to_date",
             format!("已在浏览器打开 v{} 安装包下载页", info.latest_version),
-            Some(info),
+            Some(info.clone()),
         );
         Ok(())
     }
@@ -1134,7 +1250,7 @@ pub fn start_background_update_checker(app: AppHandle) {
         loop {
             if let Ok(info) = check_latest_update() {
                 if info.has_update {
-                    emit_progress(
+                    emit_check_status(
                         &app,
                         "available",
                         format!("发现新版本 v{}", info.latest_version),
@@ -1151,6 +1267,39 @@ pub fn start_background_update_checker(app: AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn concurrent_install_reuses_latest_progress_and_can_retry_after_failure() {
+        let state = UpdateInstallState::default();
+        let event = |percent| UpdateProgressEvent {
+            stage: "downloading".to_string(),
+            message: "download".to_string(),
+            info: None,
+            percent: Some(percent),
+        };
+
+        assert!(state.begin(event(0), |_| {}));
+        state.publish(event(37), |_| {});
+        assert!(state.publish_check(update_event("checking", "checking", None), |active| {
+            assert_eq!(active.percent, Some(37));
+        }));
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                assert!(!state.begin(event(0), |active| assert_eq!(active.percent, Some(37))));
+            });
+        });
+        state.finish(Some("network error"), |failure| assert_eq!(failure.stage, "error"));
+        assert!(state.begin(event(0), |active| assert_eq!(active.percent, Some(0))));
+    }
+
+    #[test]
+    fn download_percentage_uses_transferred_bytes_and_known_size() {
+        assert_eq!(download_percent(2_424_832, Some(5_986_890)), Some(40));
+        assert_eq!(download_percent(5_986_890, Some(5_986_890)), Some(100));
+        assert_eq!(download_percent(u64::MAX, Some(10)), Some(100));
+        assert_eq!(download_percent(50, Some(0)), None);
+        assert_eq!(download_percent(50, None), None);
+    }
 
     #[test]
     fn semver_comparison_works() {

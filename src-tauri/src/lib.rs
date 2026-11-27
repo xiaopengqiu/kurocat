@@ -267,7 +267,7 @@ pub struct AppState {
     pub menu_opened_at: Arc<Mutex<Instant>>,
     pub dragging: Arc<AtomicBool>,
     pub mcp_enabled: Arc<AtomicBool>,
-    pub update_banner_open: Arc<AtomicBool>,
+    update_banner_bounds: Arc<Mutex<Option<[f64; 4]>>>,
     pub paused_guard: Arc<AtomicBool>,
 }
 
@@ -1063,8 +1063,8 @@ async fn start_pet_drag(app: AppHandle) -> bool {
 }
 
 #[tauri::command]
-fn set_update_banner_open(state: State<'_, AppState>, open: bool) {
-    state.update_banner_open.store(open, Ordering::Relaxed);
+fn set_update_banner_bounds(state: State<'_, AppState>, bounds: Option<[f64; 4]>) {
+    *state.update_banner_bounds.lock().unwrap() = bounds;
 }
 
 #[tauri::command]
@@ -1829,6 +1829,10 @@ fn is_over_interactive_silhouette(rx: f64, ry: f64, is_108: bool) -> (bool, bool
     (over_cat || over_desk, over_cat)
 }
 
+fn rect_contains([left, top, right, bottom]: [f64; 4], x: f64, y: f64) -> bool {
+    (left..=right).contains(&x) && (top..=bottom).contains(&y)
+}
+
 fn tail_picker_captures_cursor(
     bounds: Option<TailPickerBounds>,
     rx: f64,
@@ -1838,10 +1842,9 @@ fn tail_picker_captures_cursor(
     let Some(bounds) = bounds else {
         return false;
     };
-    let contains = |[left, top, right, bottom]: [f64; 4]| {
-        (left..=right).contains(&rx) && (top..=bottom).contains(&ry)
-    };
-    if contains(bounds.toolbar) || (allow_keyboard && contains(bounds.keyboard)) {
+    if rect_contains(bounds.toolbar, rx, ry)
+        || (allow_keyboard && rect_contains(bounds.keyboard, rx, ry))
+    {
         return true;
     }
 
@@ -1884,21 +1887,16 @@ mod tail_picker_hit_tests {
     }
 }
 
-/// Ensures the top update/unlock toast pill (up to ~54px tall including top margin)
-/// remains clickable even when the pet window is scaled down to 20%-36%.
-pub(crate) fn banner_hit_ry_limit(win_log_h: f64) -> f64 {
-    (54.0 / win_log_h.max(1.0)).clamp(0.19, 0.55)
-}
-
 fn start_hit_test_loop(
     app: AppHandle,
     settings: Arc<Mutex<AppSettings>>,
     menu_open: Arc<AtomicBool>,
     dragging: Arc<AtomicBool>,
-    update_banner_open: Arc<AtomicBool>,
     paused_guard: Arc<AtomicBool>,
 ) {
-    let tail_picker_bounds = app.state::<AppState>().tail_picker_bounds.clone();
+    let state = app.state::<AppState>();
+    let tail_picker_bounds = state.tail_picker_bounds.clone();
+    let update_banner_bounds = state.update_banner_bounds.clone();
     std::thread::spawn(move || {
         let mut last_ignore: Option<bool> = None;
         let mut last_cursor: (i32, i32) = (i32::MIN, i32::MIN);
@@ -1992,7 +1990,7 @@ fn start_hit_test_loop(
             let is_menu = menu_open.load(Ordering::Relaxed);
             let picker_bounds = *tail_picker_bounds.lock().unwrap();
             let is_drag = dragging.load(Ordering::Relaxed);
-            let is_banner = update_banner_open.load(Ordering::Relaxed);
+            let banner_bounds = *update_banner_bounds.lock().unwrap();
 
             // Continuous ADR-0096-style Windows Z-order guard for borderless & FSO fullscreen games:
             // - Checks O(1) topmost flag every ~200ms (or promptly ~50ms after foreground switch)
@@ -2116,7 +2114,7 @@ fn start_hit_test_loop(
                 win7_layered::set_over_cat(over_cat);
             }
 
-            let over_banner = is_banner && inside && ry <= banner_hit_ry_limit(win_log_h);
+            let over_banner = inside && banner_bounds.is_some_and(|bounds| rect_contains(bounds, rx, ry));
             // The picker lives inside the pet window, unlike the separate side menu.
             let over_tail_picker =
                 inside && tail_picker_captures_cursor(picker_bounds, rx, ry, !is_win7_ulw);
@@ -2766,14 +2764,12 @@ pub fn run() {
     let menu_opened_at = Arc::new(Mutex::new(Instant::now() - Duration::from_secs(10)));
     let dragging = Arc::new(AtomicBool::new(false));
     let mcp_enabled = Arc::new(AtomicBool::new(initial_settings.mcp_enabled));
-    let update_banner_open = Arc::new(AtomicBool::new(false));
     let paused_guard = Arc::new(AtomicBool::new(false));
 
     let settings_for_setup = settings_arc.clone();
     let menu_for_setup = menu_open.clone();
     let drag_for_setup = dragging.clone();
     let mcp_for_setup = mcp_enabled.clone();
-    let banner_for_setup = update_banner_open.clone();
     let paused_for_setup = paused_guard.clone();
 
     tauri::Builder::default()
@@ -2786,7 +2782,7 @@ pub fn run() {
             menu_opened_at,
             dragging,
             mcp_enabled,
-            update_banner_open,
+            update_banner_bounds: Arc::new(Mutex::new(None)),
             paused_guard,
         })
         .setup(move |app| {
@@ -2903,7 +2899,6 @@ pub fn run() {
                 settings_for_setup,
                 menu_for_setup,
                 drag_for_setup,
-                banner_for_setup,
                 paused_for_setup,
             );
             start_storage_watcher(handle.clone());
@@ -3005,7 +3000,7 @@ pub fn run() {
             save_tail_picker_selection,
             set_dragging,
             start_pet_drag,
-            set_update_banner_open,
+            set_update_banner_bounds,
             is_win7_ulw_mode,
             win7_present_frame,
             win7_sync_overlay,
@@ -3208,15 +3203,11 @@ mod side_menu_layout_tests {
     }
 
     #[test]
-    fn banner_hit_limit_covers_toast_at_mini_scales() {
-        // 100% scale (~440px tall): preserves classic 19% top band (~83.6px)
-        assert!((super::banner_hit_ry_limit(440.0) - 0.19).abs() < 1e-6);
-        // 36% scale (~160px tall): 54/160 = 0.3375 so 54px toast stays 100% clickable
-        let lim36 = super::banner_hit_ry_limit(160.0);
-        assert!(lim36 * 160.0 >= 53.9 && lim36 <= 0.55);
-        // 20% mini scale (~95px tall): clamped at 55% so toast never steals the whole cat
-        let lim20 = super::banner_hit_ry_limit(95.0);
-        assert!((lim20 - 0.55).abs() < 1e-6);
+    fn banner_hit_target_can_sit_below_an_agent_bubble() {
+        let update_banner = [0.1, 0.31, 0.85, 0.58];
+        assert!(super::rect_contains(update_banner, 0.7, 0.56));
+        assert!(!super::rect_contains(update_banner, 0.7, 0.16));
+        assert!(!super::rect_contains(update_banner, 0.9, 0.56));
     }
 
     #[test]

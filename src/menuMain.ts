@@ -61,6 +61,7 @@ interface UpdateProgressEvent {
   stage: 'checking' | 'available' | 'up_to_date' | 'downloading' | 'verifying' | 'installing' | 'error';
   message: string;
   info?: UpdateInfo | null;
+  percent?: number | null;
 }
 
 type MenuTabId = 'appearance' | 'system';
@@ -95,9 +96,10 @@ let settings: AppSettings = {
 let catList: CatSkinConfig[] = [...DEFAULT_BUILTIN_CATS];
 let resolvedBackendLocale: string | null = null;
 let sliderDragging = false;
-let currentAppVersion = '5.1.5';
+let currentAppVersion = '5.1.6';
 let cachedUpdateInfo: UpdateInfo | null = null;
 let updateBusy = false;
+let installLabel: string | null = null;
 let activeTab: MenuTabId = 'appearance';
 let settingsPatchSeq = 0;
 
@@ -151,8 +153,8 @@ function renderFooterUpdateState(customLabel?: string, ready = false): void {
     btnCheckUpdateEl.classList.toggle('update-ready', isReady);
   }
   if (!hint) return;
-  if (customLabel) {
-    hint.textContent = customLabel;
+  if (installLabel || customLabel) {
+    hint.textContent = installLabel ?? customLabel ?? '';
   } else if (cachedUpdateInfo?.hasUpdate) {
     hint.textContent = `⬆ ${t('menu.update_ready', { ver: cachedUpdateInfo.latestVersion })}`;
   } else {
@@ -429,6 +431,10 @@ async function createDesktopShortcut(): Promise<void> {
 }
 
 async function triggerManualUpdateCheck(): Promise<void> {
+  if (installLabel) {
+    closeMenu();
+    return;
+  }
   if (updateBusy) return;
   if (cachedUpdateInfo?.hasUpdate) {
     if (cachedUpdateInfo.downloadUrl) {
@@ -454,6 +460,7 @@ async function triggerManualUpdateCheck(): Promise<void> {
   renderFooterUpdateState(t('menu.checking_short'), false);
   try {
     const info = await invoke<UpdateInfo>('check_for_update');
+    if (installLabel) return;
     updateBusy = false;
     if (info.hasUpdate) {
       cachedUpdateInfo = info;
@@ -466,6 +473,7 @@ async function triggerManualUpdateCheck(): Promise<void> {
       }, 2200);
     }
   } catch {
+    if (installLabel) return;
     updateBusy = false;
     renderFooterUpdateState('⚠ Retry', false);
     setTimeout(() => {
@@ -744,6 +752,7 @@ async function bootstrap(): Promise<void> {
       cachedUpdateInfo = ev.payload.info;
     }
     if (ev.payload.stage === 'available' && cachedUpdateInfo?.hasUpdate) {
+      installLabel = null;
       updateBusy = false;
       renderFooterUpdateState();
     } else if (
@@ -752,8 +761,11 @@ async function bootstrap(): Promise<void> {
       ev.payload.stage === 'installing'
     ) {
       updateBusy = true;
-      renderFooterUpdateState(t('menu.checking_short'), true);
+      const { stage, percent, message } = ev.payload;
+      installLabel = stage === 'downloading' && percent != null ? `${percent}% · ${message}` : message;
+      renderFooterUpdateState(undefined, true);
     } else if (ev.payload.stage === 'up_to_date' || ev.payload.stage === 'error') {
+      installLabel = null;
       updateBusy = false;
       renderFooterUpdateState();
     }

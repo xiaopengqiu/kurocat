@@ -451,10 +451,19 @@ export class KuroCatEngine {
     return { x: base.x + (paw.side === 'left' ? -24 : 24), y: base.y - 4 };
   }
 
+  private liftedPawCenter(paw: PawState, breath: number, lift: number): Vec2 {
+    const rest = this.pawCenter(paw, breath);
+    return { x: rest.x + (paw.side === 'left' ? -43 : 43) * lift, y: rest.y - 57 * lift };
+  }
+
   public pawTapSide(clientX: number, clientY: number): PawSide | null {
     if (this.catBreed === 'dafeiyu' || this.privacyMode) return null;
     const cursor = this.clientPoint(clientX, clientY);
-    return cursor ? pawSideAt(cursor, this.pawCenter(this.leftPaw, 0), this.pawCenter(this.rightPaw, 0), 13) : null;
+    if (!cursor) return null;
+    const lift = this.highFivePose;
+    const left = this.liftedPawCenter(this.leftPaw, 0, lift?.side === 'left' ? lift.amount : 0);
+    const right = this.liftedPawCenter(this.rightPaw, 0, lift?.side === 'right' ? lift.amount : 0);
+    return pawSideAt(cursor, left, right, 13);
   }
 
   public headPatDirection(clientX: number, clientY: number): number | null {
@@ -844,6 +853,7 @@ export class KuroCatEngine {
   private idleStretch = 0;
   private petTail: TailSwing | null = null;
   private highFivePose: { side: PawSide; amount: number } | null = null;
+  private recoveryReach = 0;
   private sleepTail = 0;
   private squintAmount = 0;
   private purrAmount = 0;
@@ -1174,6 +1184,25 @@ export class KuroCatEngine {
     this.annoy = 0;
     this.curiousUntil = -10000;
     this.petEnergy = Math.max(this.petEnergy, Math.min(3.5, 0.8 + durationMs / 1000));
+  }
+
+  public triggerTaskCompletion(_tired: boolean, invite: boolean): boolean {
+    if (this.privacyMode) return false;
+    this.triggerHappyDemo();
+    if (invite && this.catBreed !== 'dafeiyu') {
+      this.petGesture.inviteHighFive(performance.now(), 'right');
+      return true;
+    }
+    return false;
+  }
+
+  public clearTaskCompletion(): void {
+    this.petGesture.clearHighFiveInvitation();
+  }
+
+  public triggerTaskRecovery(): void {
+    this.triggerWakeDemo();
+    this.petGesture.recoverTask(performance.now());
   }
 
   /** AI Companion trigger: gently wakes up the cat from sleep. */
@@ -2029,6 +2058,7 @@ export class KuroCatEngine {
     const petPose = this.petGesture.pose(now);
     this.petTail = petPose.tail;
     this.highFivePose = petPose.highFive;
+    this.recoveryReach = petPose.recovery;
 
     // 2) Staggered 240Hz spring posture (body & hunch follow a beat behind head & eyes!)
     const targetHunch = isTypingRecently
@@ -2236,7 +2266,7 @@ export class KuroCatEngine {
         this.idleAct !== null ||
         this.fxParticles.some((fx) => fx.kind !== 'z') ||
         (this.sleepAmount > 0.02 && this.sleepAmount < 0.98) ||
-        waking || this.highFivePose !== null ||
+        waking || this.highFivePose !== null || this.recoveryReach > 0 ||
         Math.abs(this.deskHopY) > 0.15 ||
         Math.abs(this.eyeXSpring.v) > 0.02 ||
         Math.abs(this.eyeYSpring.v) > 0.02 ||
@@ -4352,7 +4382,8 @@ export class KuroCatEngine {
 
   private drawPaw(ctx: CanvasRenderingContext2D, paw: PawState, breath: number): void {
     const five = this.highFivePose?.side === paw.side ? this.highFivePose.amount : 0;
-    const gestureAlpha = Math.min(1, five * 5);
+    const recovery = this.recoveryReach * (1 - five);
+    const gestureAlpha = Math.min(1, Math.max(five * 5, recovery));
     const baseAlpha = 1 - gestureAlpha;
     // 1) Seated idle vertical front legs (EXACT 4 clean lines of ORIG 0.3s!) OR planted diagonal supporting leg (ORIG 2.2s!)
     if (paw.idleWeight > 0.05) {
@@ -4384,52 +4415,50 @@ export class KuroCatEngine {
 
         if (this.customSkin) {
           this.drawCustomIdleLegDetails(ctx, this.customSkin, paw, topSp, midSp, botSp, sign, outerTopX, outerBotX, innerTopX, innerBotX);
-          ctx.restore();
-          return;
-        }
-
-        // Signature warm taupe-brown oval leg patch on viewer's RIGHT seated front leg (1:1 match to user's real Ragdoll!)
-        const isRagdoll = this.catBreed === 'ragdoll';
-        if (isRagdoll && paw.side === 'right') {
-          ctx.save();
-          ctx.fillStyle = 'rgba(134, 118, 102, 0.80)';
-          ctx.shadowColor = 'rgba(134, 118, 102, 0.40)';
-          ctx.shadowBlur = 0; /* perf: no per-frame blur */
-          ctx.beginPath();
-          ctx.ellipse(midSp.x + 21, midSp.y + 12, 9.5, 13.5, 0.22, 0, Math.PI * 2);
-          ctx.fill();
-          ctx.restore();
-        }
-
-        // Crisp subtle outer leg curve & inner leg-gap line (4 total lines across both legs — exact ORIG 0.3s!)
-        const lineGrad = ctx.createLinearGradient(topSp.x, topSp.y, botSp.x, botSp.y);
-        if (isRagdoll) {
-          lineGrad.addColorStop(0.0, 'rgba(93, 81, 72, 0.0)');
-          lineGrad.addColorStop(0.18, 'rgba(93, 81, 72, 0.62)');
-          lineGrad.addColorStop(0.92, 'rgba(93, 81, 72, 0.68)');
-          lineGrad.addColorStop(1.0, 'rgba(93, 81, 72, 0.28)');
         } else {
-          lineGrad.addColorStop(0.0, 'rgba(210, 212, 216, 0.0)');
-          lineGrad.addColorStop(0.18, 'rgba(210, 212, 216, 0.64)');
-          lineGrad.addColorStop(0.92, 'rgba(210, 212, 216, 0.62)');
-          lineGrad.addColorStop(1.0, 'rgba(210, 212, 216, 0.25)');
+          // Signature warm taupe-brown oval leg patch on viewer's RIGHT seated front leg (1:1 match to user's real Ragdoll!)
+          const isRagdoll = this.catBreed === 'ragdoll';
+          if (isRagdoll && paw.side === 'right') {
+            ctx.save();
+            ctx.fillStyle = 'rgba(134, 118, 102, 0.80)';
+            ctx.shadowColor = 'rgba(134, 118, 102, 0.40)';
+            ctx.shadowBlur = 0; /* perf: no per-frame blur */
+            ctx.beginPath();
+            ctx.ellipse(midSp.x + 21, midSp.y + 12, 9.5, 13.5, 0.22, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.restore();
+          }
+
+          // Crisp subtle outer leg curve & inner leg-gap line (4 total lines across both legs — exact ORIG 0.3s!)
+          const lineGrad = ctx.createLinearGradient(topSp.x, topSp.y, botSp.x, botSp.y);
+          if (isRagdoll) {
+            lineGrad.addColorStop(0.0, 'rgba(93, 81, 72, 0.0)');
+            lineGrad.addColorStop(0.18, 'rgba(93, 81, 72, 0.62)');
+            lineGrad.addColorStop(0.92, 'rgba(93, 81, 72, 0.68)');
+            lineGrad.addColorStop(1.0, 'rgba(93, 81, 72, 0.28)');
+          } else {
+            lineGrad.addColorStop(0.0, 'rgba(210, 212, 216, 0.0)');
+            lineGrad.addColorStop(0.18, 'rgba(210, 212, 216, 0.64)');
+            lineGrad.addColorStop(0.92, 'rgba(210, 212, 216, 0.62)');
+            lineGrad.addColorStop(1.0, 'rgba(210, 212, 216, 0.25)');
+          }
+
+          ctx.strokeStyle = lineGrad;
+          ctx.lineWidth = isRagdoll ? 1.55 : 1.4;
+          ctx.lineCap = 'round';
+
+          // Outer front-leg separation line (gently curves inward toward paw!)
+          ctx.beginPath();
+          ctx.moveTo(outerTopX, topSp.y);
+          ctx.quadraticCurveTo(midSp.x + sign * 41, midSp.y, outerBotX, botSp.y - 1);
+          ctx.stroke();
+
+          // Inner front-leg gap line (tapers slightly outward toward paws, exact inverted narrow V from ORIG 0.3s!)
+          ctx.beginPath();
+          ctx.moveTo(innerTopX, topSp.y + 10);
+          ctx.lineTo(innerBotX, botSp.y - 1);
+          ctx.stroke();
         }
-
-        ctx.strokeStyle = lineGrad;
-        ctx.lineWidth = isRagdoll ? 1.55 : 1.4;
-        ctx.lineCap = 'round';
-
-        // Outer front-leg separation line (gently curves inward toward paw!)
-        ctx.beginPath();
-        ctx.moveTo(outerTopX, topSp.y);
-        ctx.quadraticCurveTo(midSp.x + sign * 41, midSp.y, outerBotX, botSp.y - 1);
-        ctx.stroke();
-
-        // Inner front-leg gap line (tapers slightly outward toward paws, exact inverted narrow V from ORIG 0.3s!)
-        ctx.beginPath();
-        ctx.moveTo(innerTopX, topSp.y + 10);
-        ctx.lineTo(innerBotX, botSp.y - 1);
-        ctx.stroke();
       }
       ctx.restore();
     }
@@ -4465,14 +4494,13 @@ export class KuroCatEngine {
       this.drawPlumpCatArm(ctx, paw.side, sh.x, sh.y, px, py, paw.impactSquash, paw.mode !== 'mouse', false);
       ctx.restore();
     }
-    if (five > 0) {
+    if (five > 0 || recovery > 0) {
       const shoulder = this.getLiveShoulder(paw, breath);
-      const rest = this.pawCenter(paw, breath);
-      const side = paw.side === 'left' ? -1 : 1;
+      const lifted = this.liftedPawCenter(paw, breath, five);
+      const x = lifted.x;
+      const y = lifted.y + (this.kbCenterY - lifted.y) * 0.68 * recovery;
       ctx.save();
       ctx.globalAlpha = gestureAlpha;
-      const x = rest.x + side * 43 * five;
-      const y = rest.y - 57 * five;
       this.drawPlumpCatArm(ctx, paw.side, shoulder.x, shoulder.y, x, y, 0, true);
       ctx.globalAlpha = Math.max(0, five - 0.45) * 1.5;
       ctx.fillStyle = this.customSkin?.blushColor || '#c68e91';

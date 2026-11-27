@@ -7,7 +7,7 @@ const source = new URL('../src/petInteraction.ts', import.meta.url);
 const { outputText } = ts.transpileModule(readFileSync(source, 'utf8'), {
   compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2020 },
 });
-const { idleDelaySeconds, SleepTransition, PetGesture, isPetTap, bendTail, pawSideAt, isWakeBurst, gentleWakeAmount } = await import(
+const { idleDelaySeconds, SleepTransition, PetGesture, isPetTap, bendTail, pawSideAt, isWakeBurst, gentleWakeAmount, taskFatiguePose } = await import(
   `data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`
 );
 
@@ -181,4 +181,29 @@ test('grumpy wake needs a burst of four actual presses', () => {
   assert.equal(isWakeBurst([100, 150, 200], 270), false);
   assert.equal(isWakeBurst([100, 230, 390, 550], 270), false);
   assert.equal(isWakeBurst([100, 150, 200, 240], 270), true);
+});
+
+test('an offered paw stays up, answers a tap and lowers if ignored', () => {
+  const gesture = new PetGesture(() => 0);
+  gesture.inviteHighFive(100, 'right', 1600);
+  assert.equal(gesture.pose(1600).highFive, null);
+  const offer = gesture.pose(2200).highFive;
+  assert.equal(offer.side, 'right');
+  assert.ok(offer.amount > 0.5 && offer.amount < 1);
+  gesture.highFive(2200, 'right');
+  assert.equal(gesture.pose(2200).highFive.amount, offer.amount);
+  assert.ok(gesture.pose(2440).highFive.amount > offer.amount);
+  assert.equal(gesture.pose(3700).highFive, null);
+
+  gesture.inviteHighFive(4000, 'left');
+  assert.ok(gesture.pose(4500).highFive);
+  assert.equal(gesture.pose(8600).highFive, null);
+});
+
+test('fatigue starts neutral, settles with a slow exhale and releases before the paw rises', () => {
+  assert.deepEqual(taskFatiguePose(0), { slump: 0, breath: 0, eyelids: 0 });
+  assert.ok(taskFatiguePose(380).breath > 0.5);
+  assert.ok(taskFatiguePose(900).slump > 0.8);
+  assert.ok(taskFatiguePose(900).eyelids > 0.5);
+  assert.deepEqual(taskFatiguePose(1600), { slump: 0, breath: 0, eyelids: 0 });
 });

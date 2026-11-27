@@ -1,4 +1,5 @@
 import './style.css';
+import { showPetNotification } from './petNotifications';
 import { bindIdleControls, syncIdleControls } from './idlePreferences';
 import { idleDelaySeconds, isPetTap, type PawSide } from './petInteraction';
 import { invoke } from '@tauri-apps/api/core';
@@ -98,6 +99,7 @@ interface UpdateProgressEvent {
   stage: string;
   message: string;
   info: UpdateInfo | null;
+  percent?: number | null;
 }
 
 const DISMISSED_UPDATE_STORAGE_KEY = 'kurocat_dismissed_update_version';
@@ -119,9 +121,10 @@ function saveDismissedVersion(version: string): void {
   }
 }
 
-let appVersion = '5.1.5';
+let appVersion = '5.1.6';
 let latestUpdateInfo: UpdateInfo | null = null;
 let updateBusy = false;
+let installProgress: UpdateProgressEvent | null = null;
 let dismissedVersion: string | null = loadDismissedVersion();
 let currentToastKind: 'update' | 'transient' | null = null;
 let toastAutoHideTimer: number | null = null;
@@ -208,6 +211,7 @@ const agentCompanion = new AgentCompanionController({
   getTarget: () => (active3d && engine3d ? engine3d : engine),
   is3DTarget: () => Boolean(active3d && engine3d),
   allowSound: () => settings.soundEnabled !== false,
+  allowHighFive: () => !settings.clickThroughLocked && !tailPickerOpen,
 });
 
 window.addEventListener('resize', () => engine3d?.resize());
@@ -899,7 +903,6 @@ function hideUpdateToast(restorePendingUpdate = false): void {
   }
   if (!updateToastEl.classList.contains('hidden')) {
     updateToastEl.classList.add('hidden');
-    void invoke('set_update_banner_open', { open: false });
     syncWin7OverlayFn?.(false);
   }
 }
@@ -912,6 +915,7 @@ function showUpdateToast(
     showOpen?: boolean;
     autoHideMs?: number;
     busy?: boolean;
+    passive?: boolean;
     kind?: 'update' | 'transient';
   } = {},
 ): void {
@@ -925,8 +929,9 @@ function showUpdateToast(
   btnToastInstallEl.disabled = Boolean(options.busy);
   btnToastUnlockEl.classList.toggle('hidden', !options.showUnlock);
   btnToastOpenEl.classList.toggle('hidden', !options.showOpen);
-  updateToastEl.classList.remove('hidden');
-  void invoke('set_update_banner_open', { open: true });
+  btnToastCloseEl.classList.toggle('hidden', Boolean(options.passive));
+  updateToastEl.classList.toggle('passive', Boolean(options.passive));
+  showPetNotification(updateToastEl);
   requestAnimationFrame(() => syncWin7OverlayFn?.(false));
 
   if (options.autoHideMs && options.autoHideMs > 0) {
@@ -937,6 +942,7 @@ function showUpdateToast(
 }
 
 function handleUpdateProgressEvent(ev: UpdateProgressEvent, fromManual = false): void {
+  if (fromManual && installProgress) return; // A version check can finish after an install starts.
   if (ev.info) {
     latestUpdateInfo = ev.info;
     appVersion = ev.info.currentVersion || appVersion;
@@ -949,6 +955,7 @@ function handleUpdateProgressEvent(ev: UpdateProgressEvent, fromManual = false):
       showUpdateToast(t('toast.checking'), { busy: true, kind: 'transient' });
       break;
     case 'available':
+      installProgress = null;
       updateBusy = false;
       if (latestUpdateInfo?.hasUpdate) {
         const ver = latestUpdateInfo.latestVersion;
@@ -963,18 +970,24 @@ function handleUpdateProgressEvent(ev: UpdateProgressEvent, fromManual = false):
       }
       break;
     case 'up_to_date':
+      installProgress = null;
       updateBusy = false;
       setUpdateHint(`✓ v${appVersion}`);
       showUpdateToast(`✓ ${t('toast.up_to_date', { ver: appVersion })}`, { autoHideMs: 2600, kind: 'transient' });
       break;
     case 'downloading':
     case 'verifying':
-    case 'installing':
+    case 'installing': {
+      installProgress = ev;
       updateBusy = true;
-      setUpdateHint(t('menu.checking_short'), 'ready');
-      showUpdateToast(`⏳ ${ev.message}`, { busy: true, kind: 'transient' });
+      const percent = ev.stage === 'downloading' && ev.percent != null ? `${ev.percent}%` : '';
+      setUpdateHint(percent || ev.message, 'ready');
+      const label = percent ? `${percent} · ${ev.message}` : ev.message;
+      showUpdateToast(`⏳ ${label}`, { busy: true, passive: true, kind: 'transient' });
       break;
+    }
     case 'error':
+      installProgress = null;
       updateBusy = false;
       setUpdateHint('⚠', 'error');
       showUpdateToast(`⚠ ${ev.message}`, {
@@ -990,19 +1003,22 @@ async function triggerInstallUpdate(): Promise<void> {
   if (updateBusy || !latestUpdateInfo || !latestUpdateInfo.hasUpdate) return;
   updateBusy = true;
   closeContextMenu();
-  showUpdateToast(`⏳ 正在下载 v${latestUpdateInfo.latestVersion}...`, { busy: true });
+  showUpdateToast(`⏳ 正在准备更新 v${latestUpdateInfo.latestVersion}…`, { busy: true, passive: true });
   setUpdateHint('下载中...', 'ready');
   try {
     await invoke('install_update', { info: latestUpdateInfo });
   } catch (err) {
-    updateBusy = false;
     const msg = typeof err === 'string' ? err : String(err);
-    setUpdateHint('更新失败', 'error');
-    showUpdateToast(`⚠ ${msg}`, { showOpen: true, autoHideMs: 6500 });
+    handleUpdateProgressEvent({ stage: 'error', message: msg, info: null });
   }
 }
 
 async function triggerManualUpdateCheck(): Promise<void> {
+  if (installProgress) {
+    closeContextMenu();
+    handleUpdateProgressEvent(installProgress);
+    return;
+  }
   if (updateBusy) return;
   // If we already know an update is ready, clicking the menu item immediately starts installing it!
   if (latestUpdateInfo?.hasUpdate && latestUpdateInfo.downloadUrl) {
@@ -1065,6 +1081,31 @@ async function bootstrap(): Promise<void> {
     console.error('Failed to load settings or cats:', err);
   }
 
+  let lastBannerBounds = '';
+  const notificationStack = updateToastEl.parentElement!;
+  const syncUpdateBannerBounds = () => {
+    // Layout offsets stay stable during the pill's entrance animation.
+    const { offsetLeft, offsetTop, offsetWidth, offsetHeight } = updateToastEl;
+    const bounds = updateToastEl.matches('.hidden, .passive') ? null : [
+      offsetLeft / window.innerWidth,
+      (offsetTop + notificationStack.offsetTop) / window.innerHeight,
+      (offsetLeft + offsetWidth) / window.innerWidth,
+      (offsetTop + notificationStack.offsetTop + offsetHeight) / window.innerHeight,
+    ];
+    const key = bounds?.join(',') ?? '';
+    if (key !== lastBannerBounds) {
+      lastBannerBounds = key;
+      void invoke('set_update_banner_bounds', { bounds });
+    }
+  };
+  new MutationObserver(syncUpdateBannerBounds).observe(notificationStack, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ['class'],
+  });
+  window.addEventListener('resize', syncUpdateBannerBounds);
+
   await listen<UpdateProgressEvent>('kuro-update-status', (ev) => {
     handleUpdateProgressEvent(ev.payload, false);
   });
@@ -1082,7 +1123,7 @@ async function bootstrap(): Promise<void> {
 
   btnToastOpenEl.addEventListener('click', (e) => {
     e.stopPropagation();
-    const url = latestUpdateInfo?.releaseUrl || 'https://github.com/qianyiai/kurocat/releases/latest';
+    const url = latestUpdateInfo?.releaseUrl || 'https://github.com/xiaopengqiu/kurocat/releases/latest';
     void invoke('open_release_page', { url });
   });
 
@@ -1384,12 +1425,11 @@ async function bootstrap(): Promise<void> {
       }
       if (settings.clickThroughLocked && !altOverride && !e.altKey) return;
       const target = active3d && engine3d ? engine3d : engine;
-      const direction = tailPickerOpen || privacyActive ? null : target.headPatDirection(e.clientX, e.clientY);
-      const side = direction === null && !tailPickerOpen && !privacyActive
-        ? target.pawTapSide(e.clientX, e.clientY)
-        : null;
-      const gesture = direction !== null ? { kind: 'pat' as const, direction }
-        : side !== null ? { kind: 'high-five' as const, side } : null;
+      const canPet = !tailPickerOpen && !privacyActive;
+      const side = canPet ? target.pawTapSide(e.clientX, e.clientY) : null;
+      const direction = canPet && side === null ? target.headPatDirection(e.clientX, e.clientY) : null;
+      const gesture = side !== null ? { kind: 'high-five' as const, side }
+        : direction !== null ? { kind: 'pat' as const, direction } : null;
       petPress = gesture ? {
         at: performance.now(), screenX: e.screenX, screenY: e.screenY,
         moved: false, released: false, gesture, target,
@@ -1723,7 +1763,7 @@ async function bootstrap(): Promise<void> {
   // If the background updater already discovered a release before the webview finished loading, show it.
   try {
     const cachedUpd = await invoke<UpdateInfo | null>('get_cached_update_info');
-    if (cachedUpd?.hasUpdate) {
+    if (cachedUpd?.hasUpdate && !installProgress) {
       latestUpdateInfo = cachedUpd;
       setUpdateHint(`⬆ v${cachedUpd.latestVersion}`, 'ready');
       if (updateToastEl.classList.contains('hidden')) {

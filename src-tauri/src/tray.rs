@@ -824,14 +824,14 @@ pub fn setup_tray(app: &AppHandle, initial: &AppSettings) -> tauri::Result<()> {
                     let app_clone = app.clone();
                     let lang = state.settings.lock().unwrap().language.clone();
                     set_pet_visible(app, true);
-                    let _ = app_clone.emit(
-                        "kuro-update-status",
-                        crate::updater::UpdateProgressEvent {
-                            stage: "checking".to_string(),
-                            message: t(&lang, "toast.checking"),
-                            info: None,
-                        },
-                    );
+                    if crate::updater::emit_check_status(
+                        &app_clone,
+                        "checking",
+                        t(&lang, "toast.checking"),
+                        None,
+                    ) {
+                        return;
+                    }
                     std::thread::spawn(move || match crate::updater::check_latest_update() {
                         Ok(info) => {
                             let (stage, msg) = if info.has_update {
@@ -845,24 +845,15 @@ pub fn setup_tray(app: &AppHandle, initial: &AppSettings) -> tauri::Result<()> {
                                     tf(&lang, "toast.up_to_date", &[("ver", info.current_version.clone())]),
                                 )
                             };
-                            let _ = app_clone.emit(
-                                "kuro-update-status",
-                                crate::updater::UpdateProgressEvent {
-                                    stage: stage.to_string(),
-                                    message: msg,
-                                    info: Some(info),
-                                },
+                            crate::updater::emit_check_status(
+                                &app_clone,
+                                stage,
+                                msg,
+                                Some(info),
                             );
                         }
                         Err(err) => {
-                            let _ = app_clone.emit(
-                                "kuro-update-status",
-                                crate::updater::UpdateProgressEvent {
-                                    stage: "error".to_string(),
-                                    message: err,
-                                    info: None,
-                                },
-                            );
+                            crate::updater::emit_check_status(&app_clone, "error", err, None);
                         }
                     });
                 }

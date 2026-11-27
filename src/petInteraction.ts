@@ -137,6 +137,19 @@ export function bendTail(points: TailPoint[], swing: TailSwing, weight = 1): voi
   }
 }
 
+export const TASK_FATIGUE_MS = 1600;
+
+export function taskFatiguePose(elapsedMs: number): { slump: number; breath: number; eyelids: number } {
+  return {
+    slump: smoothUnit(elapsedMs / 560) * smoothUnit((TASK_FATIGUE_MS - elapsedMs) / 540),
+    breath: smoothUnit(elapsedMs / 350) * smoothUnit((840 - elapsedMs) / 460),
+    eyelids: smoothUnit(elapsedMs / 650) * smoothUnit((TASK_FATIGUE_MS - elapsedMs) / 580),
+  };
+}
+
+const HIGH_FIVE_OFFER_MS = 4200;
+const HIGH_FIVE_OFFER_HEIGHT = 0.62;
+const TASK_RECOVERY_MS = 900;
 const TAP_MS = 800;
 const STROKE_GAP_MS = 450;
 const ACCENT_MS = 750;
@@ -156,6 +169,10 @@ export class PetGesture {
   private accent: Accent | undefined;
   private highFiveAt = -Infinity;
   private highFiveSide: PawSide = 'left';
+  private highFiveStart = 0;
+  private offerAt = -Infinity;
+  private offerSide: PawSide = 'right';
+  private recoveryAt = -Infinity;
 
   constructor(private readonly random = Math.random) {}
 
@@ -168,8 +185,28 @@ export class PetGesture {
 
   highFive(now: number, side: PawSide): void {
     if (now - this.highFiveAt < HIGH_FIVE_MS) return;
+    this.highFiveStart = this.offerSide === side ? this.offeredPawHeight(now) : 0;
     this.highFiveAt = now;
     this.highFiveSide = side;
+    this.clearHighFiveInvitation();
+  }
+
+  inviteHighFive(now: number, side: PawSide, delayMs = 0): void {
+    this.offerAt = now + delayMs;
+    this.offerSide = side;
+  }
+
+  clearHighFiveInvitation(): void {
+    this.offerAt = -Infinity;
+  }
+
+  recoverTask(now: number): void {
+    this.recoveryAt = now;
+  }
+
+  private offeredPawHeight(now: number): number {
+    const age = now - this.offerAt;
+    return HIGH_FIVE_OFFER_HEIGHT * smoothUnit(age / 300) * smoothUnit((HIGH_FIVE_OFFER_MS - age) / 450);
   }
 
   stroke(now: number, direction: number): void {
@@ -195,7 +232,7 @@ export class PetGesture {
   }
 
   pose(now: number): {
-    tap: number; lean: number; tail: TailSwing | null; ear: number;
+    tap: number; lean: number; tail: TailSwing | null; ear: number; recovery: number;
     highFive: { side: PawSide; amount: number } | null;
   } {
     const tapPhase = (now - this.tapAt) / TAP_MS;
@@ -208,9 +245,16 @@ export class PetGesture {
       ? { ...this.tailSweep, elapsedMs }
       : null;
     const fiveAge = now - this.highFiveAt;
-    const fiveAmount = smoothUnit(fiveAge / 240) * smoothUnit((HIGH_FIVE_MS - fiveAge) / 420);
+    const fiveAmount = (this.highFiveStart + (1 - this.highFiveStart) * smoothUnit(fiveAge / 240)) *
+      smoothUnit((HIGH_FIVE_MS - fiveAge) / 420);
+    const offerHeight = this.offeredPawHeight(now);
+    const recoveryAge = now - this.recoveryAt;
+    const recovery = smoothUnit(recoveryAge / 260) * smoothUnit((TASK_RECOVERY_MS - recoveryAge) / 330);
     return {
-      highFive: fiveAmount > 0 ? { side: this.highFiveSide, amount: fiveAmount } : null,
+      highFive: fiveAmount > 0
+        ? { side: this.highFiveSide, amount: fiveAmount }
+        : offerHeight > 0 ? { side: this.offerSide, amount: offerHeight } : null,
+      recovery,
       tap,
       lean: this.tapDirection * tap + this.strokeDirection * stroke * (this.accent === 'rub' ? 1 + 0.5 * accent : 1),
       tail,
@@ -221,5 +265,7 @@ export class PetGesture {
   clear(): void {
     this.tapAt = this.strokeAt = this.accentAt = this.tailAt = this.highFiveAt = -Infinity;
     this.tailSweep = null;
+    this.clearHighFiveInvitation();
+    this.recoveryAt = -Infinity;
   }
 }

@@ -1,4 +1,5 @@
 import { catAudio } from './audio';
+import { showPetNotification } from './petNotifications';
 
 export type AgentStatusKind = 'working' | 'thinking' | 'waiting' | 'done' | 'error' | 'idle';
 export type AgentActionKind =
@@ -23,6 +24,7 @@ export interface AgentCompanionEvent {
   sound?: boolean;
   ttlMs?: number;
   ts?: number;
+  turn?: { sessionId?: string; start?: boolean; subagent?: boolean };
 }
 
 export interface AgentCompanionTarget {
@@ -33,6 +35,9 @@ export interface AgentCompanionTarget {
   triggerSleepDemo(): void;
   triggerHappyDemo?(duration?: number): void;
   triggerWakeDemo?(): void;
+  triggerTaskRecovery?(): void;
+  triggerTaskCompletion?(tired: boolean, invite: boolean): boolean;
+  clearTaskCompletion?(): void;
   triggerTailPatDemo?(): void;
 }
 
@@ -51,6 +56,11 @@ const CAPTIONS = {
 const ERROR_DEDUP_MS = 2_500;
 const RECOVERY_WINDOW_MS = 120_000;
 const RECOVERY_BUBBLE_MS = 3_200;
+const LONG_TASK_MS = 120_000;
+const COMPLETION_DEDUP_MS = 6_500;
+const MAX_TURN_AGE_MS = 6 * 60 * 60 * 1000;
+
+type TurnTiming = { stage: 'working' | 'done'; at: number };
 
 type CaptionKind = keyof typeof CAPTIONS;
 type RecentError = { kind: 'tool' | 'task'; at: number; tool?: string; text?: string };
@@ -60,6 +70,7 @@ export interface AgentCompanionOptions {
   getTarget: () => AgentCompanionTarget | null;
   is3DTarget: () => boolean;
   allowSound: () => boolean;
+  allowHighFive?: () => boolean;
 }
 
 export class AgentCompanionController {
@@ -67,6 +78,7 @@ export class AgentCompanionController {
   private readonly getTarget: () => AgentCompanionTarget | null;
   private readonly is3DTarget: () => boolean;
   private readonly allowSound: () => boolean;
+  private readonly allowHighFive: () => boolean;
 
   private activeStatus: AgentStatusKind = 'idle';
   private privacyPaused = false;
@@ -80,6 +92,8 @@ export class AgentCompanionController {
   private lastSoundAt = 0;
   private readonly recentErrors = new Map<string, RecentError>();
   private readonly lastCaption: Partial<Record<CaptionKind, string>> = {};
+  private readonly turnTimings = new Map<string, TurnTiming>();
+  private completionTarget: AgentCompanionTarget | null = null;
   private recoveryBubble: { source: string; text: string; until: number } | null = null;
 
   constructor(opts: AgentCompanionOptions) {
@@ -87,11 +101,14 @@ export class AgentCompanionController {
     this.getTarget = opts.getTarget;
     this.is3DTarget = opts.is3DTarget;
     this.allowSound = opts.allowSound;
+    this.allowHighFive = opts.allowHighFive ?? (() => false);
   }
 
   public setPrivacyMode(active: boolean): void {
     this.privacyPaused = Boolean(active);
     if (this.privacyPaused) {
+      this.turnTimings.clear();
+      this.clearCompletion();
       this.recoveryBubble = null;
       this.releaseAllVirtualKeys();
       this.hideBubble();
@@ -111,7 +128,17 @@ export class AgentCompanionController {
 
     const now = performance.now();
     const status = (ev.status || 'idle').toLowerCase() as AgentStatusKind;
-    const sourceKey = ev.source?.trim().toLowerCase() || 'ai';
+    const source = ev.source?.trim().toLowerCase() || 'ai';
+    const sourceKey = JSON.stringify([source, ev.turn?.sessionId]);
+    if (ev.kind === 'status' && status === 'done' && ev.turn?.subagent) return;
+    const turn = this.turnTimings.get(sourceKey);
+    if (ev.kind === 'status' && status === 'done' &&
+        turn?.stage === 'done' && now - turn.at < COMPLETION_DEDUP_MS) return;
+    for (const [key, timing] of this.turnTimings) {
+      if (now - timing.at > (timing.stage === 'done' ? COMPLETION_DEDUP_MS : MAX_TURN_AGE_MS)) {
+        this.turnTimings.delete(key);
+      }
+    }
     const errorKind = ev.errorKind === 'tool' ? 'tool' : 'task';
     const customText = ev.textIsDefault ? undefined : ev.text;
     for (const [source, error] of this.recentErrors) {
@@ -123,6 +150,7 @@ export class AgentCompanionController {
         now - previousError.at < ERROR_DEDUP_MS) return;
 
     this.clearTtlTimer();
+    if (ev.kind !== 'bubble') this.clearCompletion();
     if (ev.kind !== 'status' || status !== 'working' || this.recoveryBubble?.source !== sourceKey) {
       this.recoveryBubble = null;
     }
@@ -158,13 +186,18 @@ export class AgentCompanionController {
 
     switch (status) {
       case 'working': {
+        if (ev.turn?.start) this.turnTimings.set(sourceKey, { stage: 'working', at: now });
+        else if (!ev.turn && turn?.stage === 'done') this.turnTimings.delete(sourceKey);
         if (ev.autoType !== false) {
           this.startAutoTyping();
         } else {
           this.stopAutoTyping();
         }
         const recovered = this.recentErrors.delete(sourceKey);
-        if (recovered) target?.triggerWakeDemo?.();
+        if (recovered) {
+          if (target?.triggerTaskRecovery) target.triggerTaskRecovery();
+          else target?.triggerWakeDemo?.();
+        }
         const workingText = ev.text || '写代码中…';
         const workingTtl = ev.ttlMs ?? 45_000;
         if (customText) {
@@ -216,14 +249,22 @@ export class AgentCompanionController {
         break;
       }
       case 'done': {
+        const elapsed = turn?.stage === 'working' ? now - turn.at : 0;
+        const tired = is3d && elapsed >= LONG_TASK_MS && elapsed <= MAX_TURN_AGE_MS;
+        this.turnTimings.set(sourceKey, { stage: 'done', at: now });
         this.recentErrors.delete(sourceKey);
         this.stopAutoTyping();
-        if (target?.triggerHappyDemo) {
+        let invited = false;
+        if (target?.triggerTaskCompletion) {
+          invited = target.triggerTaskCompletion(tired, this.allowHighFive());
+          this.completionTarget = target;
+        } else if (target?.triggerHappyDemo) {
           target.triggerHappyDemo(is3d ? 2.8 : 2800);
         } else {
           target?.triggerCuriousDemo(is3d ? 2.2 : 2200);
         }
-        this.showBubble(ev.source, ev.text || '任务完成！', 'done');
+        const caption = invited ? (tired ? '这轮搞定。缓一下，击个掌？' : '这轮搞定。点爪击掌') : '任务完成！';
+        this.showBubble(ev.source, customText || caption, 'done');
         this.scheduleTtlClear(ev.ttlMs ?? 6_500);
         if (ev.sound !== false && this.allowSound()) {
           this.playNoticeThrottled('done');
@@ -231,6 +272,7 @@ export class AgentCompanionController {
         break;
       }
       case 'error': {
+        if (errorKind === 'task' && !ev.turn?.subagent) this.turnTimings.delete(sourceKey);
         this.stopAutoTyping();
         this.recentErrors.set(sourceKey, { at: now, kind: errorKind, tool: ev.tool, text: customText });
         if (errorKind === 'tool') target?.triggerCuriousDemo(is3d ? 1.5 : 1500);
@@ -243,7 +285,10 @@ export class AgentCompanionController {
         break;
       }
       default: {
-        if (status === 'idle') this.recentErrors.delete(sourceKey);
+        if (status === 'idle') {
+          this.recentErrors.delete(sourceKey);
+          this.turnTimings.delete(sourceKey);
+        }
         this.stopAutoTyping();
         if (ev.text) {
           this.showBubble(ev.source, ev.text, 'info');
@@ -254,6 +299,11 @@ export class AgentCompanionController {
         break;
       }
     }
+  }
+
+  private clearCompletion(): void {
+    this.completionTarget?.clearTaskCompletion?.();
+    this.completionTarget = null;
   }
 
   private pickCaption(kind: CaptionKind): string {
@@ -402,7 +452,7 @@ export class AgentCompanionController {
                 : tone === 'tool-error' ? '🛠️' : '🐾';
     el.dataset.tone = tone;
     el.textContent = `${icon} ${prefix}${text}`;
-    el.classList.remove('hidden');
+    showPetNotification(el);
   }
 
   private hideBubble(): void {
@@ -438,6 +488,8 @@ export class AgentCompanionController {
 
   public dispose(): void {
     this.recentErrors.clear();
+    this.turnTimings.clear();
+    this.clearCompletion();
     this.recoveryBubble = null;
     this.clearTtlTimer();
     this.stopAutoTyping();

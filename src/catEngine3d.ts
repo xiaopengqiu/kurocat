@@ -9,7 +9,7 @@ import type { KeyboardLayoutId } from './keyboardLayout';
 import type { KeyboardOrientation, TailKeyMode } from './catEngine';
 import { DEFAULT_TAIL_KEY_IDS } from './catEngine';
 import { catAudio } from './audio';
-import { bendTail, gentleWakeAmount, idleTailSwing, isWakeBurst, pawSideAt, PetGesture, SleepTransition, type PawSide } from './petInteraction';
+import { bendTail, gentleWakeAmount, idleTailSwing, isWakeBurst, pawSideAt, PetGesture, SleepTransition, TASK_FATIGUE_MS, taskFatiguePose, type PawSide } from './petInteraction';
 import {
   FurShaderSystem,
   resolveFurPalette3D,
@@ -775,6 +775,8 @@ export class KuroCatEngine3D {
 
   private petting = false;
   private readonly petGesture = new PetGesture();
+  private taskFatigueAt = -Infinity;
+  private highFiveActive = false;
   private readonly sleepTransition = new SleepTransition();
   private idleDelayMs: number | undefined;
   private idleAnimationsEnabled = true;
@@ -1873,6 +1875,7 @@ export class KuroCatEngine3D {
       this.elapsed - this.cursorActiveAt < 2.4 ||
       this.isCross ||
       this.petting || this.idleStretch > 0 || this.idleAct?.kind === 'tail' ||
+      this.highFiveActive ||
       this.elapsed < this.curiousUntil ||
       this.popups.length > 0 ||
       this.fxList.some((fx) => fx.kind !== 'z') ||
@@ -2110,6 +2113,33 @@ export class KuroCatEngine3D {
     this.petUntil = Math.max(this.petUntil, this.elapsed + durSec);
     this.sSquash.kick(0.32);
     this.wakeRendering();
+  }
+
+  public triggerTaskCompletion(tired: boolean, invite: boolean): boolean {
+    if (this.privacyMode) return false;
+    if (tired) {
+      this.triggerWakeDemo();
+      this.idleAct = null;
+      this.curiousUntil = -100;
+      this.petting = false;
+      this.taskFatigueAt = performance.now();
+    } else {
+      this.triggerHappyDemo();
+    }
+    if (invite) {
+      this.petGesture.inviteHighFive(performance.now(), 'right', tired ? TASK_FATIGUE_MS : 0);
+    }
+    return invite;
+  }
+
+  public clearTaskCompletion(): void {
+    this.taskFatigueAt = -Infinity;
+    this.petGesture.clearHighFiveInvitation();
+  }
+
+  public triggerTaskRecovery(): void {
+    this.triggerWakeDemo();
+    this.petGesture.recoverTask(performance.now());
   }
 
   public triggerWakeDemo(): void {
@@ -2527,7 +2557,9 @@ export class KuroCatEngine3D {
 
     const sleepAfterMs = this.idleDelayMs ?? (this.embedded ? 18_000 : 28_000);
     const idleSec = t - this.lastInput;
-    const canSleep = !this.privacyMode && !this.petting;
+    const fatigueAge = this.lastFrameMs - this.taskFatigueAt;
+    const fatigue = taskFatiguePose(fatigueAge);
+    const canSleep = !this.privacyMode && !this.petting && fatigueAge >= TASK_FATIGUE_MS;
     const canStretch = this.idleDelayMs !== undefined && this.idleAnimationsEnabled && !this.gameActive;
     const idleMs = this.idleDelayMs === undefined ? idleSec * 1000 : this.lastFrameMs - this.lastInputAtMs;
     const sleep = this.sleepTransition.update(canSleep ? idleMs : 0, sleepAfterMs, canStretch, canSleep && this.asleep);
@@ -2552,13 +2584,15 @@ export class KuroCatEngine3D {
     const petActive = this.petting && !this.privacyMode && !this.isCross;
     if (this.privacyMode || this.asleep) this.petGesture.clear();
     const petPose = this.petGesture.pose(this.lastFrameMs);
+    this.highFiveActive = petPose.highFive !== null;
     const wantSquint = petActive ? 1 : Math.max(petPose.tap, this.idleStretch * 0.7);
     this.squintAmt += (wantSquint - this.squintAmt) * approach(12, dt);
 
     // Curious trigger from swift cursor sweep
     this.pointerSamples = this.pointerSamples.filter((s) => t - s.t <= 0.22);
     const pointerSpeed = this.pointerSamples.reduce((a, s) => a + s.dist, 0) / 0.22;
-    const canCurious = !this.asleep && !waking && !this.privacyMode && !this.isCross && t - this.lastKey > 0.9;
+    const canCurious = !this.asleep && !waking && !this.privacyMode && !this.isCross &&
+      fatigueAge >= TASK_FATIGUE_MS && t - this.lastKey > 0.9;
     if (canCurious && this.pointerSamples.length >= 4 && pointerSpeed > 0.92) {
       this.curiousUntil = Math.max(this.curiousUntil, t + 2.2);
     }
@@ -2657,9 +2691,9 @@ export class KuroCatEngine3D {
       this.idleStretch * 0.14 + Math.sin(t * 2.0) * 0.014;
 
     this.bend.x = this.sShift.step(targetShift + petPose.lean * 0.18, dt);
-    this.bend.z = this.sHunch.step(targetHunch, dt);
-    this.bend.squash = this.sSquash.step(targetSquash, dt);
-    this.bend.bellySwell = this.sleepAmt * 0.095 + (typingActive ? 0.035 : 0);
+    this.bend.z = this.sHunch.step(targetHunch + fatigue.slump * 0.13 + petPose.recovery * 0.07, dt);
+    this.bend.squash = this.sSquash.step(targetSquash + fatigue.slump * 0.15 - fatigue.breath * 0.04, dt);
+    this.bend.bellySwell = this.sleepAmt * 0.095 + (typingActive ? 0.035 : 0) + fatigue.breath * 0.062;
 
     // 5) Head pose & silky eye tracking
     const gx = Math.tanh(this.cursorNdc.x * 1.45);
@@ -2698,7 +2732,9 @@ export class KuroCatEngine3D {
 
     targetYaw += petPose.lean * 0.17;
     targetRoll += petPose.lean * 0.22;
-    targetPitch += this.idleStretch * 0.18 - petPose.tap * 0.1;
+    targetPitch += this.idleStretch * 0.18 - petPose.tap * 0.1 + fatigue.slump * 0.21 - fatigue.breath * 0.055;
+    targetRoll = mix(targetRoll, 0.065, fatigue.slump);
+    targetGazeY = mix(targetGazeY, -0.44, fatigue.eyelids);
 
     if (act) {
       if (act.kind === 'tilt') targetRoll += act.side * 0.19 * actEnv;
@@ -2752,7 +2788,8 @@ export class KuroCatEngine3D {
       0.16 * curious -
       (petActive ? 0.15 : 0) -
       0.56 * cross -
-      0.10 * this.sleepAmt;
+      0.10 * this.sleepAmt -
+      0.12 * fatigue.slump;
     const earState = this.sEars.step(earTarget, dt);
     const earFlick = act && act.kind === 'ear' ? Math.sin(actU * Math.PI * 2) * 0.22 : 0;
     for (const e of this.ears) {
@@ -2801,7 +2838,7 @@ export class KuroCatEngine3D {
 
       if (showOpenEye) {
         const irisRx = 0.156 * (1 + curious * 0.06);
-        const eyeClose = Math.max(blinkClose, this.sleepAmt * 1.65);
+        const eyeClose = Math.max(blinkClose, this.sleepAmt * 1.65, fatigue.eyelids * 0.78);
         const irisRy = Math.max(0.02, 0.136 * (1 + curious * 0.09) * (1 - eyeClose * 0.8));
 
         const pRx = clamp(
@@ -2947,6 +2984,12 @@ export class KuroCatEngine3D {
       const pawTrack = arm.s < 0 ? this.paws.L : this.paws.R;
       this.attachLocal(arm.shoulderLocal, arm.shoulder);
       arm.hand.copy(pawTrack.pos);
+      if (petPose.recovery > 0) {
+        const key = arm.s < 0 ? 'f' : 'j';
+        const keyTop = this.desk.keyTopWorld(key, this.tmpV1);
+        keyTop.y += 0.11;
+        arm.hand.lerp(keyTop, petPose.recovery * 0.62);
+      }
       const five = petPose.highFive?.side === (arm.s < 0 ? 'left' : 'right') ? fiveAmount : 0;
       if (five > 0) {
         // Reach toward the viewer without affecting the keyboard or mouse tracking springs.
@@ -2955,7 +2998,7 @@ export class KuroCatEngine3D {
         arm.hand.z = mix(arm.hand.z, this.homePos.z + 0.98, five);
       }
 
-      const tuck = pawTrack.tuckWeight * (1 - five);
+      const tuck = pawTrack.tuckWeight * (1 - Math.max(five, petPose.recovery * 0.65));
       const onMouse = arm.s < 0 && mousing;
       const reach = arm.shoulder.distanceTo(arm.hand);
       const lift = mix(0.24, 0.06, clamp((reach - 0.85) / 0.85, 0, 1)) * (1 - tuck * 0.65);

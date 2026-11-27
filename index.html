@@ -8,14 +8,16 @@
   <body>
     <canvas id="pet-canvas"></canvas>
     <canvas id="pet-canvas-3d" class="hidden"></canvas>
-    <div id="agent-bubble" class="agent-bubble hidden" role="status" aria-live="polite"></div>
+    <div class="pet-notifications">
+      <div id="agent-bubble" class="agent-bubble hidden" role="status" aria-live="polite"></div>
 
-    <div id="update-toast" class="update-toast hidden" role="status" aria-live="polite">
-      <span class="update-toast-text" id="update-toast-text">✨ 新版本</span>
-      <button class="update-toast-btn hidden" id="btn-toast-install" data-i18n="toast.btn_install" type="button">立即更新</button>
-      <button class="update-toast-btn hidden" id="btn-toast-unlock" data-i18n="toast.btn_unlock" type="button">解锁</button>
-      <button class="update-toast-btn secondary hidden" id="btn-toast-open" data-i18n="toast.btn_open" type="button">打开发布页</button>
-      <button class="update-toast-close" id="btn-toast-close" type="button" data-i18n-title="menu.close_title" title="关闭">×</button>
+      <div id="update-toast" class="update-toast hidden" role="status" aria-live="polite">
+        <span class="update-toast-text" id="update-toast-text">✨ 新版本</span>
+        <button class="update-toast-btn hidden" id="btn-toast-install" data-i18n="toast.btn_install" type="button">立即更新</button>
+        <button class="update-toast-btn hidden" id="btn-toast-unlock" data-i18n="toast.btn_unlock" type="button">解锁</button>
+        <button class="update-toast-btn secondary hidden" id="btn-toast-open" data-i18n="toast.btn_open" type="button">打开发布页</button>
+        <button class="update-toast-close" id="btn-toast-close" type="button" data-i18n-title="menu.close_title" title="关闭">×</button>
+      </div>
     </div>
 
     <div id="tail-picker-bar" class="tail-picker-bar hidden" role="dialog" aria-label="Custom Tail Keys">

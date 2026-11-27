@@ -50,8 +50,21 @@ pub struct AgentCompanionEvent {
     pub sound: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttl_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn: Option<AgentTurnContext>,
     #[serde(default)]
     pub ts: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentTurnContext {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub start: bool,
+    #[serde(default)]
+    pub subagent: bool,
 }
 
 fn now_epoch_ms() -> u64 {
@@ -202,6 +215,34 @@ pub fn parse_hook_payload(
     event_hint: Option<&str>,
     text_hint: Option<&str>,
 ) -> Option<AgentCompanionEvent> {
+    let hook_event = raw
+        .get("hookEventName")
+        .or_else(|| raw.get("hook_event_name"))
+        .or_else(|| raw.get("event"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let mut event = normalize_hook_payload(raw, source_hint, event_hint, text_hint, &hook_event)?;
+    let session_id = ["sessionId", "session_id", "thread-id", "thread_id"]
+        .into_iter()
+        .filter_map(|key| raw.get(key).and_then(Value::as_str))
+        .find_map(|id| clean_short_text(id, 128));
+    let start = matches!(hook_event.as_str(), "preinvocation" | "userpromptsubmit" | "beforesubmitprompt");
+    let subagent = matches!(hook_event.as_str(), "subagentstart" | "subagentstop");
+    if event.kind == "status" && (session_id.is_some() || start || subagent) {
+        event.turn = Some(AgentTurnContext { session_id, start, subagent });
+    }
+    Some(event)
+}
+
+fn normalize_hook_payload(
+    raw: &Value,
+    source_hint: Option<&str>,
+    event_hint: Option<&str>,
+    text_hint: Option<&str>,
+    hook_event: &str,
+) -> Option<AgentCompanionEvent> {
     let ts = now_epoch_ms();
     let source = detect_hook_source(raw, source_hint);
     let override_text = text_hint
@@ -230,6 +271,7 @@ pub fn parse_hook_payload(
                 auto_type: Some(false),
                 sound: explicit_sound,
                 ttl_ms: Some(explicit_ttl.unwrap_or(5_000)),
+                turn: None,
                 ts,
             });
         }
@@ -267,6 +309,7 @@ pub fn parse_hook_payload(
                 auto_type: Some(explicit_auto_type.unwrap_or(default_auto_type)),
                 sound: Some(explicit_sound.unwrap_or(default_sound)),
                 ttl_ms: Some(explicit_ttl.unwrap_or(default_ttl)),
+                turn: None,
                 ts,
             });
         }
@@ -280,13 +323,14 @@ pub fn parse_hook_payload(
                 status: Some("done".to_string()),
                 action: None,
                 source: Some(source),
-                text_is_default: None,
+                text_is_default: override_text.is_none().then_some(true),
                 error_kind: None,
                 text: override_text.or_else(|| Some("任务完成！".to_string())),
                 tool: None,
                 auto_type: Some(false),
                 sound: Some(explicit_sound.unwrap_or(true)),
                 ttl_ms: Some(explicit_ttl.unwrap_or(6_500)),
+                turn: None,
                 ts,
             });
         }
@@ -295,12 +339,6 @@ pub fn parse_hook_payload(
     // 3) Native Lifecycle Hooks:
     //    - Antigravity: `hookEventName`, `toolCall.name`, `error`, `terminationReason`
     //    - Claude Code / WorkBuddy / Codex `hooks.json` / Cursor: `hook_event_name`, `tool_name`
-    let hook_event = raw
-        .get("hookEventName")
-        .or_else(|| raw.get("hook_event_name"))
-        .or_else(|| raw.get("event"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
     if hook_event.is_empty() {
         // Text-only bubble fallback
         if let Some(txt) = override_text {
@@ -316,6 +354,7 @@ pub fn parse_hook_payload(
                 auto_type: Some(false),
                 sound: Some(explicit_sound.unwrap_or(false)),
                 ttl_ms: Some(explicit_ttl.unwrap_or(5_000)),
+                turn: None,
                 ts,
             });
         }
@@ -341,8 +380,7 @@ pub fn parse_hook_payload(
         .unwrap_or("")
         .trim();
 
-    let ev_lower = hook_event.trim().to_ascii_lowercase();
-    match ev_lower.as_str() {
+    match hook_event {
         "sessionstart" | "session_start" => Some(AgentCompanionEvent {
             kind: "status".to_string(),
             status: Some("idle".to_string()),
@@ -355,6 +393,7 @@ pub fn parse_hook_payload(
             auto_type: Some(false),
             sound: Some(false),
             ttl_ms: Some(explicit_ttl.unwrap_or(3_200)),
+            turn: None,
             ts,
         }),
         "sessionend" | "session_end" => Some(AgentCompanionEvent {
@@ -369,6 +408,7 @@ pub fn parse_hook_payload(
             auto_type: Some(false),
             sound: Some(false),
             ttl_ms: Some(1_000),
+            turn: None,
             ts,
         }),
         "preinvocation" | "userpromptsubmit" | "beforesubmitprompt" => Some(AgentCompanionEvent {
@@ -383,6 +423,7 @@ pub fn parse_hook_payload(
             auto_type: Some(explicit_auto_type.unwrap_or(true)),
             sound: Some(false),
             ttl_ms: Some(explicit_ttl.unwrap_or(45_000)),
+            turn: None,
             ts,
         }),
         "pretooluse" | "posttooluse" | "postinvocation" | "beforeshellexecution"
@@ -400,6 +441,7 @@ pub fn parse_hook_payload(
                     auto_type: Some(false),
                     sound: Some(explicit_sound.unwrap_or(false)),
                     ttl_ms: Some(explicit_ttl.unwrap_or(8_000)),
+                    turn: None,
                     ts,
                 });
             }
@@ -416,6 +458,7 @@ pub fn parse_hook_payload(
                 auto_type: Some(explicit_auto_type.unwrap_or(auto_type)),
                 sound: Some(false),
                 ttl_ms: Some(explicit_ttl.unwrap_or(45_000)),
+                turn: None,
                 ts,
             })
         }
@@ -431,6 +474,7 @@ pub fn parse_hook_payload(
             auto_type: Some(false),
             sound: Some(explicit_sound.unwrap_or(false)),
             ttl_ms: Some(explicit_ttl.unwrap_or(8_500)),
+            turn: None,
             ts,
         }),
         "permissionrequest" | "notification" => Some(AgentCompanionEvent {
@@ -445,6 +489,7 @@ pub fn parse_hook_payload(
             auto_type: Some(false),
             sound: Some(explicit_sound.unwrap_or(true)),
             ttl_ms: Some(explicit_ttl.unwrap_or(90_000)),
+            turn: None,
             ts,
         }),
         "stop" | "subagentstop" => {
@@ -461,6 +506,7 @@ pub fn parse_hook_payload(
                     auto_type: Some(false),
                     sound: Some(false),
                     ttl_ms: Some(1_000),
+                    turn: None,
                     ts,
                 });
             }
@@ -477,6 +523,7 @@ pub fn parse_hook_payload(
                     auto_type: Some(false),
                     sound: Some(explicit_sound.unwrap_or(true)),
                     ttl_ms: Some(explicit_ttl.unwrap_or(9_000)),
+                    turn: None,
                     ts,
                 });
             }
@@ -485,13 +532,14 @@ pub fn parse_hook_payload(
                 status: Some("done".to_string()),
                 action: None,
                 source: Some(source),
-                text_is_default: None,
+                text_is_default: override_text.is_none().then_some(true),
                 error_kind: None,
                 text: override_text.or_else(|| Some("任务完成！".to_string())),
                 tool: None,
                 auto_type: Some(false),
                 sound: Some(explicit_sound.unwrap_or(true)),
                 ttl_ms: Some(explicit_ttl.unwrap_or(6_500)),
+                turn: None,
                 ts,
             })
         }
@@ -1600,6 +1648,18 @@ mod tests {
         });
         let ev5 = parse_hook_payload(&stop_cancel, None, None, None).unwrap();
         assert_eq!(ev5.status.as_deref(), Some("idle"));
+    }
+
+    #[test]
+    fn relates_codex_prompt_and_notify_but_marks_subagent_completion() {
+        let parse = |raw| parse_hook_payload(&raw, Some("Codex"), None, None).unwrap().turn.unwrap();
+        let start = parse(json!({"hook_event_name": "UserPromptSubmit", "session_id": "thread-test"}));
+        let done = parse(json!({"type": "agent-turn-complete", "thread-id": "thread-test"}));
+        let subagent = parse(json!({"hook_event_name": "SubagentStop", "session_id": "thread-test"}));
+        assert!(start.start);
+        assert!(!done.start);
+        assert_eq!(start.session_id, done.session_id);
+        assert!(subagent.subagent);
     }
 
     #[test]
